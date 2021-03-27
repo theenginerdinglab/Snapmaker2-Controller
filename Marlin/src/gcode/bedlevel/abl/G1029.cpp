@@ -108,7 +108,7 @@ void GcodeSuite::G1029() {
   const bool seen_a = parser.seen("A");
   if (seen_a) {
 
-    thermalManager.disable_all_heaters();
+    //thermalManager.disable_all_heaters(); //Removed this line so bed stays hot when probing to be more accurate
     process_cmd_imd("G28");
     set_bed_leveling_enabled(false);
 
