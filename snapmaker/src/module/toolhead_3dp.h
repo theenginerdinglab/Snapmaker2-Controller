@@ -50,8 +50,10 @@ class ToolHead3DP: public ModuleBase {
 
     ErrCode SetFan(uint8_t fan_index, uint8_t speed, uint8_t delay_time=0);
     ErrCode SetPID(uint8_t index, float value, uint8_t extrude_index=0);
+    float * GetPID(uint8_t extrude_index=0);
+    void UpdatePID(uint8_t index, float val) {if (index < 3) pid_[index]=val;};
     ErrCode SetHeater(uint16_t target_temp, uint8_t extrude_index=0);
-
+    void GetFilamentState();
     void Process();
 
     bool IsOnline(uint8_t head_index=0) { return mac_index_ != MODULE_MAC_INDEX_INVALID; };
@@ -93,13 +95,13 @@ class ToolHead3DP: public ModuleBase {
       return filament_state_;
     }
 
-    void SetTemp(uint16_t temp, uint8_t extrude_index=0) {
+    void SetTemp(int16_t temp, uint8_t extrude_index=0) {
       if (extrude_index >= EXTRUDERS)
         return;
 
       cur_temp_[extrude_index] = temp;
     }
-    uint16_t GetTemp(uint8_t extrude_index=0) {
+    int16_t GetTemp(uint8_t extrude_index=0) {
       if (extrude_index >= EXTRUDERS)
         return 0;
 
@@ -114,12 +116,13 @@ class ToolHead3DP: public ModuleBase {
 
     uint16_t timer_in_process_;
 
-    uint16_t cur_temp_[EXTRUDERS];
+    int16_t cur_temp_[EXTRUDERS];
     uint8_t  fan_speed_[TOOLHEAD_3DP_FAN_MAX];
 
     // 1 bit indicates one sensor
     uint8_t probe_state_;
     uint8_t filament_state_;
+    float pid_[3];
 };
 
 extern ToolHead3DP *printer1;

@@ -50,6 +50,7 @@ GcodeSuite gcode;
 #endif
 
 #include "../Marlin.h" // for idle() and suspend_auto_report
+#include "../../../snapmaker/src/hmi/gcode_result_handler.h"
 
 millis_t GcodeSuite::previous_move_ms;
 
@@ -658,6 +659,8 @@ void GcodeSuite::execute_command(void) {
       #if ENABLED(ADVANCED_PAUSE_FEATURE)
         case 600: M600(); break;                                  // M600: Pause for Filament Change
         case 603: M603(); break;                                  // M603: Configure Filament Change
+      #else
+        case 600: M600(); break;
       #endif
 
       #if HAS_DUPLICATION_MODE
@@ -763,12 +766,15 @@ void GcodeSuite::execute_command(void) {
       #if ENABLED(POWER_LOSS_RECOVERY)
         case 413: M413(); break;                                  // M413: Enable/disable/query Power-Loss Recovery
         case 1000: M1000(); break;                                // M1000: Resume from power-loss
+      #else
+        case 413: M413(); break;
       #endif
       case 1005: M1005(); break;
       case 1006: M1006(); break;
       case 1007: M1007(); break;
 
       case 1010: M1010(); break;                                  // M1010 control/query chamber status, compatible with Snapmaker1
+      case 1011: M1011(); break;                                  // M1011 control/query purifier status
 
       case 1026:
         enable_wait = !enable_wait;
@@ -780,6 +786,7 @@ void GcodeSuite::execute_command(void) {
         break;
 
       case 1028: M1028(); break;
+      case 1029: M1029(); break;
 
       case 1999: M1999(); break;
 
@@ -837,6 +844,8 @@ void GcodeSuite::process_parsed_command(
     ok_to_send();
 }
 
+#include "../../snapmaker/src/common/debug.h"
+
 /**
  * Process a single command and dispatch it to its handler
  * This is called from the main loop()
@@ -858,6 +867,9 @@ void GcodeSuite::process_next_command() {
   // Parse the next command in the queue
   parser.parse(current_command);
   process_parsed_command();
+
+  gcode_result_handler.GcodeResultFlush();
+  Screen_send_ok[cmd_queue_index_r] = false;
 }
 
 #if USE_EXECUTE_COMMANDS_IMMEDIATE

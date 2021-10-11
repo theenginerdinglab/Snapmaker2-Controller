@@ -34,6 +34,7 @@
 #include "src/module/motion.h"
 #include "src/module/planner.h"
 #include "rotary_module.h"
+#include "src/module/stepper.h"
 
 
 #define LASER_CLOSE_FAN_DELAY     (120)
@@ -68,6 +69,11 @@ ErrCode ToolHeadLaser::Init(MAC_t &mac, uint8_t mac_index) {
 
   Function_t    function;
   message_id_t  message_id[4];
+
+  if (axis_to_port[E_AXIS] != PORT_8PIN_1) {
+    LOG_E("toolhead Laser failed: Please use the <M1029 E1> set E port\n");
+    return E_HARDWARE;
+  }
 
   ret = ModuleBase::InitModule8p(mac, E0_DIR_PIN, 0);
   if (ret != E_SUCCESS)
@@ -262,14 +268,15 @@ ErrCode ToolHeadLaser::GetFocus(SSTP_Event_t &event) {
   LoadFocus();
   vTaskDelay(pdMS_TO_TICKS(20));
 
-  LOG_I("SC get Focus: %.2f mm\n", focus_ / 1000.0f);
+  LOG_I("SC get Focus: %.2f mm\n", focus_);
+  uint16_t focus = focus_ * 1000;
 
   buff[0] = 0;
 
   buff[1] = 0;
   buff[2] = 0;
-  buff[3] = (uint8_t)(focus_>>8);
-  buff[4] = (uint8_t)focus_;
+  buff[3] = (uint8_t)(focus>>8);
+  buff[4] = (uint8_t)focus;
 
   event.length = 5;
   event.data   = buff;

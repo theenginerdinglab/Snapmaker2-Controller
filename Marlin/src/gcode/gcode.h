@@ -769,6 +769,8 @@ private:
   #if ENABLED(ADVANCED_PAUSE_FEATURE)
     static void M600();
     static void M603();
+  #else
+    static void M600();
   #endif
 
   #if HAS_DUPLICATION_MODE
@@ -875,15 +877,19 @@ private:
   #if ENABLED(POWER_LOSS_RECOVERY)
     static void M413();
     static void M1000();
+  #else
+    static void M413();
   #endif
 
   static void M1005();
   static void M1006();
   static void M1007();
 
-  static void M1028();
-
   static void M1010();
+  static void M1011();
+
+  static void M1028();
+  static void M1029();
 
   static void M1999();
 

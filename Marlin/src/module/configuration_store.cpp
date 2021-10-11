@@ -37,7 +37,7 @@
  */
 
 // Change EEPROM version if the structure changes
-#define EEPROM_VERSION "V69"
+#define EEPROM_VERSION "V71"
 #define EEPROM_OFFSET 100
 
 // Check the integrity of data offsets.
@@ -84,6 +84,7 @@
 #if ENABLED(POWER_LOSS_RECOVERY)
   #include "../feature/power_loss_recovery.h"
 #endif
+#include "../../../snapmaker/src/service/power_loss_recovery.h"
 
 #include "../feature/pause.h"
 
@@ -124,8 +125,13 @@ typedef struct SettingsDataStruct {
   // DISTINCT_E_FACTORS
   //
   uint8_t   esteppers;                                  // XYZE_N - XYZ
-
+  uint8_t axis_to_port[X_TO_E];
   planner_settings_t planner_settings;
+  #if ENABLED(BACKLASH_GCODE)
+    float backlash_distance_mm[XN],
+      backlash_correction;
+  #endif
+
 
   float planner_max_jerk[X_TO_E],                       // M205 XYZBE  planner.max_jerk[XYZBE]
         planner_junction_deviation_mm;                  // M205 J     planner.junction_deviation_mm
@@ -483,11 +489,14 @@ void MarlinSettings::postprocess() {
     const uint8_t esteppers = COUNT(planner.settings.axis_steps_per_mm) - XN;
     EEPROM_WRITE(esteppers);
 
+    EEPROM_WRITE(axis_to_port);
     //
     // Planner Motion
     //
     {
       EEPROM_WRITE(planner.settings);
+      EEPROM_WRITE(backlash_distance_mm);
+      EEPROM_WRITE(backlash_correction);
 
       #if HAS_CLASSIC_JERK
         EEPROM_WRITE(planner.max_jerk);
@@ -783,7 +792,7 @@ void MarlinSettings::postprocess() {
         #if ENABLED(POWER_LOSS_RECOVERY)
           recovery.enabled
         #else
-          true
+          pl_recovery.enable()
         #endif
       ;
       EEPROM_WRITE(recovery_enabled);
@@ -1205,6 +1214,7 @@ void MarlinSettings::postprocess() {
       // Number of esteppers may change
       uint8_t esteppers;
       EEPROM_READ_ALWAYS(esteppers);
+      EEPROM_READ_ALWAYS(axis_to_port);
 
       //
       // Planner Motion
@@ -1233,6 +1243,12 @@ void MarlinSettings::postprocess() {
         EEPROM_READ(planner.settings.travel_acceleration);
         EEPROM_READ(planner.settings.min_feedrate_mm_s);
         EEPROM_READ(planner.settings.min_travel_feedrate_mm_s);
+        
+        #if ENABLED(BACKLASH_GCODE)
+          // M425
+          EEPROM_READ(backlash_distance_mm);
+          EEPROM_READ(backlash_correction);
+        #endif
 
         #if HAS_CLASSIC_JERK
           EEPROM_READ(planner.max_jerk);
@@ -1523,6 +1539,7 @@ void MarlinSettings::postprocess() {
         #else
           bool recovery_enabled;
           EEPROM_READ(recovery_enabled);
+          pl_recovery.enable(recovery_enabled);
         #endif
       }
 
@@ -1866,6 +1883,7 @@ void MarlinSettings::postprocess() {
           EEPROM_READ(l_home_offset[i]);
         }
       }
+      reset_homeoffset();
       #endif //ENABLED(SW_MACHINE_SIZE)
 
       //
@@ -2073,6 +2091,10 @@ void MarlinSettings::postprocess() {
 void MarlinSettings::reset() {
   static const float tmp1[] PROGMEM = DEFAULT_AXIS_STEPS_PER_UNIT, tmp2[] PROGMEM = DEFAULT_MAX_FEEDRATE;
   static const uint32_t tmp3[] PROGMEM = DEFAULT_MAX_ACCELERATION;
+  uint8_t temp_axis_to_port[X_TO_E] = DEFAULT_AXIS_TO_PORT;
+  LOOP_X_TO_EN(i) {
+    axis_to_port[i] = temp_axis_to_port[i];
+  }
   LOOP_X_TO_EN(i) {
     planner.settings.axis_steps_per_mm[i]          = pgm_read_float(&tmp1[ALIM(i, tmp1)]);
     planner.settings.max_feedrate_mm_s[i]          = pgm_read_float(&tmp2[ALIM(i, tmp2)]);
@@ -2085,7 +2107,12 @@ void MarlinSettings::reset() {
   planner.settings.travel_acceleration = DEFAULT_TRAVEL_ACCELERATION;
   planner.settings.min_feedrate_mm_s = DEFAULT_MINIMUMFEEDRATE;
   planner.settings.min_travel_feedrate_mm_s = DEFAULT_MINTRAVELFEEDRATE;
-
+  #if ENABLED(BACKLASH_GCODE)
+    LOOP_XN(i) {
+      backlash_distance_mm[i] = 0;
+    }
+    backlash_correction = BACKLASH_CORRECTION;
+  #endif
   #if HAS_CLASSIC_JERK
     #ifndef DEFAULT_XJERK
       #define DEFAULT_XJERK 0
@@ -2279,6 +2306,8 @@ void MarlinSettings::reset() {
 
   #if ENABLED(POWER_LOSS_RECOVERY)
     recovery.enable(true);
+  #else
+    pl_recovery.enable(true);
   #endif
 
   //
