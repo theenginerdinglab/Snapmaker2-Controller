@@ -687,7 +687,8 @@
  * Override with M92
  *                                      X, Y, Z, B, E0 [, E1[, E2[, E3[, E4[, E5]]]]]
  */
-#define DEFAULT_AXIS_STEPS_PER_UNIT   { 400, 400, 400, 888.89, 212.21 }
+#define DEFAULT_AXIS_STEPS_PER_UNIT   { 400, 400, 400, 888.89, 212.21}
+#define DEFAULT_TMC_AXIS_STEPS_PER_UNIT   { MODULE_LINEAR_PITCH_20, MODULE_LINEAR_PITCH_20, MODULE_LINEAR_PITCH_8, 888.89, 212.21 }
 
 #define MODULE_LINEAR_PITCH_20        160
 #define MODULE_LINEAR_PITCH_8         400
@@ -1047,6 +1048,10 @@
   extern float s_home_offset[XN];
   extern float m_home_offset[XN];
   extern float l_home_offset[XN];
+
+  extern float print_min_planner_speed;
+  extern float laser_min_planner_speed;
+  extern float cnc_min_planner_speed;
 
 #define S_HOME_OFFSET_DEFAULT {-7, -5, 0, 0}
 #define M_HOME_OFFSET_DEFAULT {-15.5, -7, 0, 0}

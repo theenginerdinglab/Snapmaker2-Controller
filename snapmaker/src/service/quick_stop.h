@@ -46,6 +46,7 @@ enum QuickStopSource : uint8_t {
   QS_SOURCE_STOP,
   QS_SOURCE_POWER_LOSS,
   QS_SOURCE_STOP_BUTTON,
+  QS_SOURCE_SECURITY,
 
   QS_SOURCE_INVALID
 };
@@ -58,11 +59,13 @@ class QuickStopService {
     bool CheckInISR(block_t *blk);
 
     void Trigger(QuickStopSource new_source, bool from_isr=false);
+    void HandleProtection();
     void EmergencyStop();
     void Process();
 
     bool inline isTriggered() { return source_ != QS_SOURCE_IDLE; }
     bool inline isIdle() { return source_ == QS_SOURCE_IDLE; }
+    bool isPowerLoss() {return source_ == QS_SOURCE_POWER_LOSS;}
 
   private:
     void Park();
@@ -73,6 +76,7 @@ class QuickStopService {
     QuickStopSource source_ = QS_SOURCE_IDLE;
     QuickStopSource pre_source_ = QS_SOURCE_IDLE;
     bool wrote_flash_ = false;
+    bool  homing_is_interrupted_ = false;  // Homing process triggers stop
 };
 
 extern QuickStopService quickstop;

@@ -20,29 +20,14 @@
  *
  */
 
-#include "../gcode.h"
-#include "../../module/printcounter.h"
-#include "../../../../snapmaker/src/service/system.h"
-#include "../../../../snapmaker/src/service/power_loss_recovery.h"
-
-#if ENABLED(EXTENSIBLE_UI)
-  #include "../../lcd/extensible_ui/ui_api.h"
-#endif
-
+#include "../../gcode.h"
+#include "../../../module/printcounter.h"
+#include "../../../../../snapmaker/src/service/system.h"
+#include "../../../../../snapmaker/src/service/power_loss_recovery.h"
 /**
- * M75: Start print timer
+ * M25: Pause hmi print
  */
-void GcodeSuite::M75() {
-  print_job_timer.start();
-  #if ENABLED(EXTENSIBLE_UI)
-    ExtUI::onPrintTimerStarted();
-  #endif
-}
-
-/**
- * M76: Pause print timer
- */
-void GcodeSuite::M76() {
+void GcodeSuite::M25() {
   SSTP_Event_t event;
   event.id = EID_SYS_CTRL_REQ;
   event.op_code = SYSCTL_OPC_PAUSE;
@@ -53,38 +38,3 @@ void GcodeSuite::M76() {
   // To pause recovery, skip the current line
   pl_recovery.SaveCmdLine(pl_recovery.LastLine() + 1);
 }
-
-/**
- * M77: Stop print timer
- */
-void GcodeSuite::M77() {
- print_job_timer.stop();
- #if ENABLED(EXTENSIBLE_UI)
-   ExtUI::onPrintTimerStopped();
- #endif
-}
-
-#if ENABLED(PRINTCOUNTER)
-
-/**
- * M78: Show print statistics
- */
-void GcodeSuite::M78() {
-  if (parser.intval('S') == 78) {  // "M78 S78" will reset the statistics
-    print_job_timer.initStats();
-    ui.reset_status();
-    return;
-  }
-
-  #if HAS_SERVICE_INTERVALS
-    if (parser.seenval('R')) {
-      print_job_timer.resetServiceInterval(parser.value_int());
-      ui.reset_status();
-      return;
-    }
-  #endif
-
-  print_job_timer.showStats();
-}
-
-#endif // PRINTCOUNTER

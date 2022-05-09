@@ -60,6 +60,7 @@
   #include "../snapmaker/src/module/toolhead_3dp.h"
   #include "../snapmaker/src/service/bed_level.h"
   #include "../snapmaker/src/module/linear.h"
+  #include "../snapmaker/src/module/toolhead_laser.h"
 #endif
 
 #if ENABLED(QUICK_HOME)
@@ -188,10 +189,14 @@
  *
  */
 void GcodeSuite::G28(const bool always_home_all) {
-
+  axis_is_homing = true;
   if (DEBUGGING(LEVELING)) {
     DEBUG_ECHOLNPGM(">>> G28");
     log_machine_info();
+  }
+  if (laser->IsOnline()) {
+    laser->InlineDisable();
+    laser->TurnOff();
   }
 
   #if ENABLED(DUAL_X_CARRIAGE)
@@ -219,6 +224,7 @@ void GcodeSuite::G28(const bool always_home_all) {
       #endif
     ) {
       if (DEBUGGING(LEVELING)) DEBUG_ECHOLNPGM("> homing not needed, skip\n<<< G28");
+      axis_is_homing = false;
       return;
     }
   }
@@ -497,4 +503,5 @@ void GcodeSuite::G28(const bool always_home_all) {
       L6470.set_param(cv, L6470_ABS_POS, stepper.position((AxisEnum)L6470.axis_xref[cv]));
     }
   #endif
+  axis_is_homing = false;
 }

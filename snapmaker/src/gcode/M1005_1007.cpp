@@ -59,8 +59,8 @@ void GcodeSuite::M1005() {
     canhost.ShowModuleVersion(mac);
   }
 
-  if (ModuleBase::toolhead() == MACHINE_TYPE_LASER) {
-    laser.ReadBluetoothVer();
+  if (ModuleBase::toolhead() == MACHINE_TYPE_LASER || (ModuleBase::toolhead() == MACHINE_TYPE_LASER_10W)) {
+    laser->ReadBluetoothVer();
   }
   SERIAL_ECHO("Machine Size: ");
   switch (linear_p->machine_size()) {
@@ -94,9 +94,17 @@ void GcodeSuite::M1006() {
   case MODULE_TOOLHEAD_LASER:
     SERIAL_ECHOLN("LASER");
     SERIAL_ECHO("Current Status: ");
-    SERIAL_ECHOLN((laser.state() == TOOLHEAD_LASER_STATE_ON)? "ON" : "OFF");
-    SERIAL_ECHOLNPAIR("Current Power: ", laser.power());
-    SERIAL_ECHOLNPAIR("Focus Height: ", laser.focus());
+    SERIAL_ECHOLN((laser->state() == TOOLHEAD_LASER_STATE_ON)? "ON" : "OFF");
+    SERIAL_ECHOLNPAIR("Current Power: ", laser->power());
+    SERIAL_ECHOLNPAIR("Focus Height: ", laser->focus());
+    break;
+
+  case MODULE_TOOLHEAD_LASER_10W:
+    SERIAL_ECHOLN("10W LASER");
+    SERIAL_ECHO("Current Status: ");
+    SERIAL_ECHOLN((laser->state() == TOOLHEAD_LASER_STATE_ON)? "ON" : "OFF");
+    SERIAL_ECHOLNPAIR("Current Power: ", laser->power());
+    SERIAL_ECHOLNPAIR("Focus Height: ", laser->focus());
     break;
 
   case MODULE_TOOLHEAD_CNC:

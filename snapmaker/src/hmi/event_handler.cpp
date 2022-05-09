@@ -80,6 +80,82 @@ uint32_t CommandLine[BUFSIZE] = { INVALID_CMD_LINE };
 
 extern uint8_t cmd_queue_index_w; // Ring buffer write position
 
+//
+// Gcode is the variable used for bulk transfer
+//
+RingBuffer<HmiGcodeBufNode_t> hmi_gcode_pack_buffer;
+bool wait_req_next_pack = false;  // Wait for the buffer to be free before requesting the next packet
+GcodeRequestStatus gcode_request_status = GCODE_REQ_NORMAL;
+bool is_hmi_gcode_pack_mode = false;
+uint32_t next_pack_start_line_num = 0;
+uint32_t gcode_pack_req_timeout = 0;
+
+
+void hmi_gcode_pack_mode(bool mode) {
+  is_hmi_gcode_pack_mode = mode;
+}
+
+bool hmi_gcode_pack_mode() {
+  return is_hmi_gcode_pack_mode;
+}
+
+void event_handler_init() {
+  HmiGcodeBufNode_t *tmp = (HmiGcodeBufNode_t *)pvPortMalloc(HMI_GCODE_PACK_BUF_COUNT * sizeof(HmiGcodeBufNode_t));
+  if (!tmp) {
+    LOG_E("Failed to apply for gcode buf\n");
+    return;
+  }
+  memset(tmp, 0, sizeof(HMI_GCODE_PACK_BUF_COUNT * sizeof(HmiGcodeBufNode_t)));
+  hmi_gcode_pack_buffer.Init(HMI_GCODE_PACK_BUF_COUNT, tmp);
+}
+
+void releas_current_buffer() {
+  hmi_gcode_pack_buffer.RemoveOne();
+  if (wait_req_next_pack) {
+    wait_req_next_pack = false;
+    ack_gcode_event(EID_FILE_GCODE_PACK_ACK, gocde_pack_start_line());
+  }
+}
+
+char * get_command_from_pack(uint32_t &line_num) {
+  if (hmi_gcode_pack_buffer.IsEmpty()) {
+    return NULL;
+  }
+  HmiGcodeBufNode_t *head = hmi_gcode_pack_buffer.HeadAddress();
+  char *ret = &head->buf[head->cursor];
+
+  if (head->is_finish_packet) {
+    gcode_request_status = GCODE_REQ_WAIT_FINISHED;
+    releas_current_buffer();
+    return NULL;
+  }
+  // Remove '\n' and ';'
+  while ( (((*ret) == '\n') || ((*ret) == ';')) && (head->cursor < head->length) ) {
+    head->cursor++;
+    if (((*ret) == '\n')) {
+      head->start_line_num++;
+    }
+    ret++;
+  }
+
+  if (head->cursor == head->length) {
+    releas_current_buffer();
+    return NULL;
+  }
+
+  while (head->cursor < head->length) {
+    if (head->buf[++head->cursor] == '\n') {
+      head->buf[head->cursor++] = 0;
+      break;
+    }
+  }
+  // The request line number starts at 0, and the file line starts from 1
+  line_num = ++head->start_line_num;
+  if (head->cursor == head->length) {
+    releas_current_buffer();
+  }
+  return ret;
+}
 
 /**
  *SC20 queue the gcdoe
@@ -105,6 +181,20 @@ void enqueue_hmi_to_marlin() {
 
     hmi_cmd_queue_index_r = (hmi_cmd_queue_index_r + 1) % HMI_BUFSIZE;
     hmi_commands_in_queue--;
+    commands_in_queue++;
+  }
+
+  uint32_t line_num = 0;
+  while (commands_in_queue < BUFSIZE && (!hmi_gcode_pack_buffer.IsEmpty())) {
+    char *cmd = get_command_from_pack(line_num);
+    if (!cmd) {
+      continue;
+    }
+    strcpy(command_queue[cmd_queue_index_w], cmd);
+    Screen_send_ok[cmd_queue_index_w] = false;
+    CommandLine[cmd_queue_index_w] = line_num;
+    send_ok[cmd_queue_index_w] = false;
+    cmd_queue_index_w = (cmd_queue_index_w + 1) % BUFSIZE;
     commands_in_queue++;
   }
 }
@@ -163,12 +253,22 @@ bool ok_to_HMI() {
   return Screen_send_ok[cmd_queue_index_r];
 }
 
+// The line number requested when transferring Gcode in bulk
+void gocde_pack_start_line(uint32_t line) {
+  next_pack_start_line_num = line;
+}
+uint32_t gocde_pack_start_line() {
+  return next_pack_start_line_num;
+}
+
 
 /**
  * Clear the Marlin command queue
  */
 void clear_hmi_gcode_queue() {
   hmi_cmd_queue_index_r = hmi_cmd_queue_index_w = hmi_commands_in_queue = 0;
+  hmi_gcode_pack_buffer.Reset();
+  gcode_request_status = GCODE_REQ_NORMAL;
 }
 
 
@@ -182,10 +282,33 @@ void ack_gcode_event(uint8_t event_id, uint32_t line) {
   WORD_TO_PDU_BYTES(buffer, line);
 
   SNAP_DEBUG_SET_GCODE_LINE(line);
-
+  gcode_request_status = GCODE_REQ_WAITING;
+  gcode_pack_req_timeout = millis();
   hmi.Send(event);
 }
 
+void check_and_request_gcode_again() {
+  if (gcode_request_status == GCODE_REQ_WAITING) {
+    if ((gcode_pack_req_timeout + 1000) > millis()) {
+      return;
+    }
+    gcode_pack_req_timeout = millis();
+    LOG_E("wait gcode pack timeout and req:%d\n", gocde_pack_start_line());
+    ack_gcode_event(EID_FILE_GCODE_PACK_ACK, gocde_pack_start_line());
+    if(!planner.movesplanned()) { // and no movement planned
+      if (ModuleBase::toolhead() != MODULE_TOOLHEAD_3DP && laser->tim_pwm() > 0) {
+        systemservice.is_laser_on = true;
+        laser->TurnOff();
+      }
+    }
+  } else if (gcode_request_status == GCODE_REQ_WAIT_FINISHED) {
+    // File execution ends, and printing ends after motion is stopped
+    if ((commands_in_queue == 0) && (hmi_gcode_pack_buffer.IsEmpty()) && (!planner.movesplanned())) {
+      LOG_I("End of the print\n");
+      systemservice.StopTrigger(TRIGGER_SOURCE_SC, SYSCTL_OPC_FINISH);
+    }
+  }
+}
 
 static ErrCode HandleGcode(uint8_t *event_buff, uint16_t size) {
   event_buff[size] = 0;
@@ -223,7 +346,7 @@ static ErrCode HandleFileGcode(uint8_t *event_buff, uint16_t size) {
     if (systemservice.is_waiting_gcode) {
       if (systemservice.is_laser_on) {
         systemservice.is_laser_on = false;
-        laser.TurnOn();
+        laser->TurnOn();
       }
     }
 
@@ -246,6 +369,97 @@ static ErrCode HandleFileGcode(uint8_t *event_buff, uint16_t size) {
   }
   else {
     LOG_E("recv line[%u] less than cur line[%u]\n", line, systemservice.current_line());
+  }
+
+  return E_SUCCESS;
+}
+
+static ErrCode HandleFileGcodePack(uint8_t *event_buff, uint16_t size) {
+  uint32_t start_line, end_line;
+  uint16_t recv_line_count = 0, line_count = 0;
+
+  SysStatus   cur_sta = systemservice.GetCurrentStatus();
+  WorkingPort port = systemservice.GetWorkingPort();
+
+  if (port != WORKING_PORT_SC) {
+    LOG_E("working port is not SC for file gcode!\n");
+    return E_INVALID_STATE;
+  }
+
+  if (cur_sta != SYSTAT_WORK && cur_sta != SYSTAT_RESUME_WAITING) {
+    LOG_E("not handle file Gcode in this status: %u\n", cur_sta);
+    return E_INVALID_STATE;
+  }
+
+  if (cur_sta == SYSTAT_RESUME_WAITING) {
+    ErrCode err = systemservice.ResumeOver();
+    if (err != E_SUCCESS) {
+      LOG_I("Resume over failed:%d\n", err);
+      ack_gcode_event(EID_FILE_GCODE_PACK_ACK, gocde_pack_start_line());
+      return err;
+    }
+  }
+
+  // checkout the line number
+  #define LINE_TYPE_SIZE 4
+  PDU_TO_LOCAL_WORD(start_line, event_buff+1);
+  PDU_TO_LOCAL_WORD(end_line, event_buff+1+LINE_TYPE_SIZE);
+  line_count = end_line - start_line + 1;
+  if (start_line != next_pack_start_line_num) {
+    LOG_E("request line[%u],but recv[%d]\n", next_pack_start_line_num, start_line);
+    return E_INVALID_STATE;
+  }
+  uint16_t data_head_index = (1 + 2*LINE_TYPE_SIZE);
+  event_buff[size] = 0;
+  for (uint16_t i = data_head_index; i < size; i++) {
+    if (event_buff[i] == '\n') {
+      recv_line_count++;
+    }
+  }
+
+  // line_count is 0 file transfer end
+  if (recv_line_count && (recv_line_count != line_count)) {
+    LOG_E("Lines number check fail:%u - %u\n", line_count, recv_line_count);
+    return E_INVALID_STATE;
+  }
+
+  if ((size - data_head_index) > HMI_GCODE_PACK_SIZE) {
+    LOG_E("The package size should be less than %u!\n", HMI_GCODE_PACK_SIZE);
+    return E_INVALID_STATE;
+  }
+
+  if (hmi_gcode_pack_buffer.IsFull()) {
+    LOG_E("Gcode pack buf full!\n");
+    return E_INVALID_STATE;
+  }
+
+  // Avoid defining large local variables, so request space directly from the queue
+  HmiGcodeBufNode_t *gcode_buf = hmi_gcode_pack_buffer.TailAddress();
+  gcode_buf->start_line_num = start_line;
+  gcode_buf->end_line_num = end_line;
+  gcode_buf->length = size - data_head_index;
+  gcode_buf->cursor = 0;
+  gcode_request_status = GCODE_REQ_NORMAL;
+  if (gcode_buf->length == 0) {
+    gcode_buf->is_finish_packet = true;
+    hmi_gcode_pack_buffer.InsertOne();
+    wait_req_next_pack = false;
+  } else {
+    memcpy(gcode_buf->buf, event_buff+data_head_index, gcode_buf->length);
+    //  The memory data has been modified so no more assignment is required
+    hmi_gcode_pack_buffer.InsertOne();
+    gocde_pack_start_line(end_line + 1);
+    if (hmi_gcode_pack_buffer.IsFull()) {
+      wait_req_next_pack = true;
+    } else {
+      wait_req_next_pack = false;
+      ack_gcode_event(EID_FILE_GCODE_PACK_ACK, gocde_pack_start_line());
+    }
+    gcode_buf->is_finish_packet = false;
+  }
+  if (ModuleBase::toolhead() != MODULE_TOOLHEAD_3DP && systemservice.is_laser_on) {
+    systemservice.is_laser_on = false;
+    laser->TurnOn();
   }
 
   return E_SUCCESS;
@@ -294,6 +508,25 @@ static ErrCode SetLogLevel(SSTP_Event_t &event) {
   return debug.SetLogLevel(event);
 }
 
+static ErrCode SetGcodeToPackMode(SSTP_Event_t &event) {
+  uint8_t status = 0;
+  uint8_t is_work = event.data[0];
+  event.data = &status;
+  event.length = 1;
+  hmi.Send(event);
+  if (is_work) {
+    hmi_gcode_pack_mode(true);
+    // The controller is required to actively request the line number
+    ack_gcode_event(EID_FILE_GCODE_PACK_ACK, gocde_pack_start_line());
+  }
+
+  return E_SUCCESS;
+}
+
+static ErrCode GetSecurityStatus(SSTP_Event_t &event) {
+  return laser->GetSecurityStatus(event);
+}
+
 EventCallback_t sysctl_event_cb[SYSCTL_OPC_MAX] = {
   UNDEFINED_CALLBACK,
   /* [SYSCTL_OPC_GET_STATUES]        =  */{EVENT_ATTR_DEFAULT,      SendStatus},
@@ -311,7 +544,9 @@ EventCallback_t sysctl_event_cb[SYSCTL_OPC_MAX] = {
   UNDEFINED_CALLBACK,
   /* [SYSCTL_OPC_GET_HOME_STATUS]    =  */{EVENT_ATTR_DEFAULT,      SendHomeAndCoordinateStatus},
   /* [SYSCTL_OPC_SET_LOG_LEVEL]      =  */{EVENT_ATTR_DEFAULT,      SetLogLevel},
-  UNDEFINED_CALLBACK
+  UNDEFINED_CALLBACK,
+  /* [SYSCTL_OPC_GET_SECURITY_STATUS] = */{EVENT_ATTR_DEFAULT,      GetSecurityStatus},
+  /* [SYSCTL_OPC_SET_GCODE_PACK_MODE]     =  */{EVENT_ATTR_DEFAULT,      SetGcodeToPackMode},
 };
 
 
@@ -329,7 +564,18 @@ static ErrCode SetManualLevelingPoint(SSTP_Event_t &event) {
 }
 
 static ErrCode AdjustZOffsetInLeveling(SSTP_Event_t &event) {
-  return levelservice.AdjustZOffsetInLeveling(event);
+  ErrCode ret;
+  if (is_hmi_gcode_pack_mode) {
+    clear_hmi_gcode_queue();
+    planner.synchronize();
+    gocde_pack_start_line(systemservice.current_line() + 1);
+    ret = levelservice.AdjustZOffsetInLeveling(event);
+    ack_gcode_event(EID_FILE_GCODE_PACK_ACK, gocde_pack_start_line());
+  } else {
+    ret = levelservice.AdjustZOffsetInLeveling(event);
+  }
+
+  return ret;
 }
 
 static ErrCode SaveAndExitLeveling(SSTP_Event_t &event) {
@@ -341,21 +587,24 @@ static ErrCode ExitLeveling(SSTP_Event_t &event) {
 }
 
 static ErrCode GetFocalLength(SSTP_Event_t &event) {
-  return laser.GetFocus(event);
+  return laser->GetFocus(event);
 }
 
 static ErrCode SetFocalLength(SSTP_Event_t &event) {
-  return laser.SetFocus(event);
+  return laser->SetFocus(event);
 }
 
 static ErrCode DoManualFocusing(SSTP_Event_t &event) {
-  return laser.DoManualFocusing(event);
+  return laser->DoManualFocusing(event);
 }
 
 static ErrCode DoAutoFocusing(SSTP_Event_t &event) {
-  return laser.DoAutoFocusing(event);
+  return laser->DoAutoFocusing(event);
 }
 
+static ErrCode IsLeveled(SSTP_Event_t &event) {
+  return levelservice.IsLeveled(event);
+}
 
 static ErrCode ChangeRuntimeEnv(SSTP_Event_t &event) {
   return systemservice.ChangeRuntimeEnv(event);
@@ -367,6 +616,26 @@ static ErrCode GetRuntimeEnv(SSTP_Event_t &event) {
 
 static ErrCode GetMachineSize(SSTP_Event_t &event) {
   return systemservice.GetMachineSize(event);
+}
+
+static ErrCode SetAutoFocusLight(SSTP_Event_t &event) {
+  return laser->SetAutoFocusLight(event);
+}
+
+static ErrCode SetOnlineSyncId(SSTP_Event_t &event) {
+  return laser->SetOnlineSyncId(event);
+}
+
+static ErrCode GetOnlineSyncId(SSTP_Event_t &event) {
+  return laser->GetOnlineSyncId(event);
+}
+
+static ErrCode SetProtectTemp(SSTP_Event_t &event) {
+  return laser->SetProtectTemp(event);
+}
+
+static ErrCode LaserGetHWVersion(SSTP_Event_t &event) {
+  return laser->LaserGetHWVersion();
 }
 
 EventCallback_t settings_event_cb[SETTINGS_OPC_MAX] = {
@@ -387,10 +656,14 @@ EventCallback_t settings_event_cb[SETTINGS_OPC_MAX] = {
   /* [SETTINGS_OPC_DO_FAST_CALIBRATION]    =  */{EVENT_ATTR_HAVE_MOTION,  DoAutoLeveling},
   /* [SETTINGS_OPC_SET_RUNTIME_ENV]        =  */{EVENT_ATTR_HAVE_MOTION,  ChangeRuntimeEnv},
   /* [SETTINGS_OPC_GET_RUNTIME_ENV]        =  */{EVENT_ATTR_DEFAULT,      GetRuntimeEnv},
-  UNDEFINED_CALLBACK,
-  UNDEFINED_CALLBACK,
-  UNDEFINED_CALLBACK,
-  /* [SETTINGS_OPC_GET_MACHINE_SIZE]       =  */{EVENT_ATTR_HAVE_MOTION,  GetMachineSize}
+  /* [SETTINGS_OPC_SET_AUTOFOCUS_LIGHT]    =  */{EVENT_ATTR_DEFAULT,      SetAutoFocusLight},
+  /* [SETTINGS_OPC_GET_ONLINE_SYNC_ID]     =  */{EVENT_ATTR_DEFAULT,      GetOnlineSyncId},
+  /* [SETTINGS_OPC_SET_ONLINE_SYNC_ID]     =  */{EVENT_ATTR_DEFAULT,      SetOnlineSyncId},
+  /* [SETTINGS_OPC_GET_MACHINE_SIZE]       =  */{EVENT_ATTR_HAVE_MOTION,  GetMachineSize},
+  /* [SETTINGS_OPC_GET_IS_LEVELED]         =  */{EVENT_ATTR_DEFAULT,      IsLeveled},
+  /* [SETTINGS_OPC_SET_LASER_TEMP]         =  */{EVENT_ATTR_DEFAULT,      SetProtectTemp},
+  /* [SETTINGS_OPC_GET_LASER_HW_VERSION]   =  */{EVENT_ATTR_DEFAULT,      LaserGetHWVersion},
+
 };
 
 
@@ -513,15 +786,15 @@ EventCallback_t motion_event_cb[MOTION_OPC_MAX] = {
 
 
 static ErrCode SetCameraBtName(SSTP_Event_t &event) {
-  return laser.SetCameraBtName(event);
+  return laser->SetCameraBtName(event);
 }
 
 static ErrCode GetCameraBtName(SSTP_Event_t &event) {
-  return laser.GetCameraBtName(event);
+  return laser->GetCameraBtName(event);
 }
 
 static ErrCode GetCameraBtMAC(SSTP_Event_t &event) {
-  return laser.GetCameraBtMAC(event);
+  return laser->GetCameraBtMAC(event);
 }
 
 EventCallback_t camera_event_cb[CAMERA_OPC_MAX] = {
@@ -651,9 +924,9 @@ EventCallback_t addon_event_cb[ADDON_OPC_MAX] = {
   /* [ADDON_OPC_GET_ADDON_STOP]        =  */{EVENT_ATTR_DEFAULT,  GetAddonStopStatus},
   /* [ADDON_OPC_GET_ROTATE_STATE]        =  */{EVENT_ATTR_DEFAULT,  GetRotateStatus},
   /* [ADDON_OPC_GET_PURIFIER_STATE]          = */{EVENT_ATTR_DEFAULT, GetPurifierStatus},
-  /* [ADDON_OPC_GET_PURIFIER_FAN_STATE]      = */{EVENT_ATTR_DEFAULT, GetPurifierFanStatus},        
-  /* [ADDON_OPC_SET_PURIFIER_FAN_STATE]      = */{EVENT_ATTR_DEFAULT, SetPurifierFanStatus},        
-  /* [ADDON_OPC_SET_PURIFIER_GEARS_STATE]    = */{EVENT_ATTR_DEFAULT, SetPurifierGearsStatus},      
+  /* [ADDON_OPC_GET_PURIFIER_FAN_STATE]      = */{EVENT_ATTR_DEFAULT, GetPurifierFanStatus},
+  /* [ADDON_OPC_SET_PURIFIER_FAN_STATE]      = */{EVENT_ATTR_DEFAULT, SetPurifierFanStatus},
+  /* [ADDON_OPC_SET_PURIFIER_GEARS_STATE]    = */{EVENT_ATTR_DEFAULT, SetPurifierGearsStatus},
   /* [ADDON_OPC_GET_PURIFIER_TIMELIFE_STATE] = */{EVENT_ATTR_DEFAULT, GetPurifierTimelifeStatus},
 };
 
@@ -779,6 +1052,10 @@ ErrCode DispatchEvent(DispatcherParam_t param) {
     }
     else
       send_to_marlin = true;
+    break;
+
+  case EID_FILE_GCODE_PACK_REQ:
+    return HandleFileGcodePack(param->event_buff, param->size);
     break;
 
   case EID_SYS_CTRL_REQ:

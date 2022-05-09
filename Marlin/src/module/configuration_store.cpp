@@ -37,7 +37,7 @@
  */
 
 // Change EEPROM version if the structure changes
-#define EEPROM_VERSION "V71"
+#define EEPROM_VERSION "V73"
 #define EEPROM_OFFSET 100
 
 // Check the integrity of data offsets.
@@ -85,6 +85,7 @@
   #include "../feature/power_loss_recovery.h"
 #endif
 #include "../../../snapmaker/src/service/power_loss_recovery.h"
+#include "../../../snapmaker/src/module/linear.h"
 
 #include "../feature/pause.h"
 
@@ -126,6 +127,7 @@ typedef struct SettingsDataStruct {
   //
   uint8_t   esteppers;                                  // XYZE_N - XYZ
   uint8_t axis_to_port[X_TO_E];
+  bool is_user_set_lead;
   planner_settings_t planner_settings;
   #if ENABLED(BACKLASH_GCODE)
     float backlash_distance_mm[XN],
@@ -298,6 +300,12 @@ typedef struct SettingsDataStruct {
   float m_home_offset[XN];
   float l_home_offset[XN];
   #endif
+
+  float print_min_planner_speed;
+  float laser_min_planner_speed;
+  float cnc_min_planner_speed;
+
+
 
 
   //
@@ -490,6 +498,7 @@ void MarlinSettings::postprocess() {
     EEPROM_WRITE(esteppers);
 
     EEPROM_WRITE(axis_to_port);
+    EEPROM_WRITE(planner.is_user_set_lead);
     //
     // Planner Motion
     //
@@ -1138,6 +1147,12 @@ void MarlinSettings::postprocess() {
       }
     }
     #endif //ENABLED(SW_MACHINE_SIZE)
+    _FIELD_TEST(print_min_planner_speed);
+    EEPROM_WRITE(print_min_planner_speed);
+    _FIELD_TEST(laser_min_planner_speed);
+    EEPROM_WRITE(laser_min_planner_speed);
+    _FIELD_TEST(cnc_min_planner_speed);
+    EEPROM_WRITE(cnc_min_planner_speed);
 
     // save brightness of light bar
     //uint32_t lb_brightness = (uint32_t)lightbar.get_brightness();
@@ -1216,6 +1231,7 @@ void MarlinSettings::postprocess() {
       EEPROM_READ_ALWAYS(esteppers);
       EEPROM_READ_ALWAYS(axis_to_port);
 
+      EEPROM_READ(planner.is_user_set_lead);
       //
       // Planner Motion
       //
@@ -1883,7 +1899,15 @@ void MarlinSettings::postprocess() {
           EEPROM_READ(l_home_offset[i]);
         }
       }
-      reset_homeoffset();
+      set_homeoffset();
+
+      _FIELD_TEST(print_min_planner_speed);
+      EEPROM_READ(print_min_planner_speed);
+      _FIELD_TEST(laser_min_planner_speed);
+      EEPROM_READ(laser_min_planner_speed);
+      _FIELD_TEST(cnc_min_planner_speed);
+      EEPROM_READ(cnc_min_planner_speed);
+      set_min_planner_speed();
       #endif //ENABLED(SW_MACHINE_SIZE)
 
       //
@@ -1977,7 +2001,6 @@ void MarlinSettings::postprocess() {
     else {
       systemservice.ThrowException(EHOST_MC, ETYPE_LOST_CFG);
       reset();
-      save();
       return true;
     }
   }
@@ -2095,11 +2118,13 @@ void MarlinSettings::reset() {
   LOOP_X_TO_EN(i) {
     axis_to_port[i] = temp_axis_to_port[i];
   }
+  planner.is_user_set_lead = false;
   LOOP_X_TO_EN(i) {
     planner.settings.axis_steps_per_mm[i]          = pgm_read_float(&tmp1[ALIM(i, tmp1)]);
     planner.settings.max_feedrate_mm_s[i]          = pgm_read_float(&tmp2[ALIM(i, tmp2)]);
     planner.settings.max_acceleration_mm_per_s2[i] = pgm_read_dword(&tmp3[ALIM(i, tmp3)]);
   }
+  linear_p->reset_axis_steps_per_unit();
 
   planner.settings.min_segment_time_us = DEFAULT_MINSEGMENTTIME;
   planner.settings.acceleration = DEFAULT_ACCELERATION;
@@ -2402,6 +2427,8 @@ void MarlinSettings::reset() {
   reset_homeoffset();
   #endif //ENABLED(SW_MACHINE_SIZE)
 
+  reset_min_planner_speed();
+
   GRID_MAX_POINTS_X = 3;
   GRID_MAX_POINTS_Y = 3;
 
@@ -2614,6 +2641,9 @@ void MarlinSettings::reset() {
         "  M205 B", LINEAR_UNIT(planner.settings.min_segment_time_us)
       , " S", LINEAR_UNIT(planner.settings.min_feedrate_mm_s)
       , " T", LINEAR_UNIT(planner.settings.min_travel_feedrate_mm_s)
+      , " P", print_min_planner_speed
+      , " L", laser_min_planner_speed
+      , " C", cnc_min_planner_speed
       #if ENABLED(JUNCTION_DEVIATION)
         , " J", LINEAR_UNIT(planner.junction_deviation_mm)
       #endif

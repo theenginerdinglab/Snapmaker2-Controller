@@ -22,7 +22,7 @@
 #define SNAPMAKER_EVENT_HANDLER_H_
 
 #include "../common/error.h"
-
+#include "src/Marlin.h"
 #include "uart_host.h"
 
 // event IDs
@@ -39,6 +39,10 @@
 #define EID_SYS_CTRL_REQ      7
 #define EID_SYS_CTRL_ACK      8
 
+// gcode pack from file
+#define EID_FILE_GCODE_PACK_REQ    0x13
+#define EID_FILE_GCODE_PACK_ACK    0x14
+
 enum SysControlOpc: uint8_t {
   SYSCTL_OPC_UNUSED_0 = 0,
   SYSCTL_OPC_GET_STATUES,
@@ -54,8 +58,9 @@ enum SysControlOpc: uint8_t {
   SYSCTL_OPC_WAIT_EVENT = 0xC,
   SYSCTL_OPC_GET_HOME_STATUS = 0xE,
   SYSCTL_OPC_SET_LOG_LEVEL = 0xF,
-
-  SYSCTL_OPC_TRANS_LOG,
+  SYSCTL_OPC_TRANS_LOG = 0x10,
+  SYSCTL_OPC_SECURITY_STATUS = 0x11,
+  SYSCTL_OPC_SET_GCODE_PACK_MODE = 0x12,
 
   SYSCTL_OPC_MAX
 };
@@ -85,10 +90,14 @@ enum SettingsOpc: uint8_t {
   SETTINGS_OPC_DO_FAST_CALIBRATION = 0xe,
   SETTINGS_OPC_SET_RUNTIME_ENV,
   SETTINGS_OPC_GET_RUNTIME_ENV,
-  SETTINGS_OPC_0x11,
-  SETTINGS_OPC_0x12,
-  SETTINGS_OPC_0x13,
+  SETTINGS_OPC_SET_AUTOFOCUS_LIGHT,
+  SETTINGS_OPC_GET_ONLINE_SYNC_ID,
+  SETTINGS_OPC_SET_ONLINE_SYNC_ID,
   SETTINGS_OPC_GET_MACHINE_SIZE,
+
+  SETTINGS_OPC_GET_IS_LEVELED,
+  SETTINGS_OPC_SET_LASER_TEMP,
+  SETTINGS_OPC_GET_LASER_HW_VERSION,
 
   SETTINGS_OPC_MAX
 };
@@ -206,6 +215,12 @@ enum GcodeResultOpc: uint8_t {
 #define UNDEFINED_CALLBACK  {0, NULL}
 
 
+enum GcodeRequestStatus: uint8_t {
+  GCODE_REQ_NORMAL = 0,
+  GCODE_REQ_WAITING = 1,
+  GCODE_REQ_WAIT_FINISHED = 2
+};
+
 enum TaskOwner: uint8_t {
   TASK_OWN_MARLIN = 0,
   TASK_OWN_HMI,
@@ -219,12 +234,24 @@ struct DispatcherParam {
   MessageBufferHandle_t event_queue;
 };
 
-typedef struct DispatcherParam* DispatcherParam_t;
+typedef struct {
+  uint16_t length;
+  uint16_t cursor;
+  uint32_t start_line_num;
+  uint32_t end_line_num;
+  bool is_finish_packet;
+  char buf[HMI_GCODE_PACK_SIZE];
+} HmiGcodeBufNode_t;
 
+typedef struct DispatcherParam* DispatcherParam_t;
+void event_handler_init();
 ErrCode DispatchEvent(DispatcherParam_t param);
 void clear_hmi_gcode_queue();
 void ack_gcode_event(uint8_t event_id, uint32_t line);
-
+void gocde_pack_start_line(uint32_t line);
+uint32_t gocde_pack_start_line();
+bool hmi_gcode_pack_mode();
+void check_and_request_gcode_again();
 extern bool Screen_send_ok[];
 
 extern UartHost hmi;

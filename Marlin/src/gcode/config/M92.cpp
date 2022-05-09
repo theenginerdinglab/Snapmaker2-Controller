@@ -28,6 +28,7 @@ void report_M92(const bool echo=true, const int8_t e=-1) {
   SERIAL_ECHOPAIR(" M92 X", LINEAR_UNIT(planner.settings.axis_steps_per_mm[X_AXIS]));
   SERIAL_ECHOPAIR(" Y", LINEAR_UNIT(planner.settings.axis_steps_per_mm[Y_AXIS]));
   SERIAL_ECHOPAIR(" Z", LINEAR_UNIT(planner.settings.axis_steps_per_mm[Z_AXIS]));
+  SERIAL_ECHOPAIR(" B", LINEAR_UNIT(planner.settings.axis_steps_per_mm[B_AXIS]));
   #if DISABLED(DISTINCT_E_FACTORS)
     SERIAL_ECHOPAIR(" E", VOLUMETRIC_UNIT(planner.settings.axis_steps_per_mm[E_AXIS]));
   #endif
@@ -85,6 +86,7 @@ void GcodeSuite::M92() {
       else {
         planner.settings.axis_steps_per_mm[i] = parser.value_per_axis_units((AxisEnum)i);
       }
+      planner.is_user_set_lead = true;
     }
   }
   planner.refresh_positioning();

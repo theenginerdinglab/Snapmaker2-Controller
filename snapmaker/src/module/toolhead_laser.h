@@ -26,6 +26,8 @@
 
 #include "../hmi/uart_host.h"
 
+#include "src/module/planner.h"
+
 #define TOOLHEAD_LASER_POWER_SAFE_LIMIT   (0.5)
 #define TOOLHEAD_LASER_POWER_NORMAL_LIMIT (100)
 #define TOOLHEAD_LASER_CAMERA_FOCUS_MAX   (65000)  // mm*1000
@@ -81,32 +83,46 @@ enum LaserCameraCommand {
   S_RECV_FAIL = 0xff,
 };
 
+enum LASER_10W_STATUS {
+  LASER_10W_ENABLE,
+  LASER_10W_WAIT_DISABLE,
+  LASER_10W_DISABLE,
+};
+
 
 class ToolHeadLaser: public ModuleBase {
   public:
-		ToolHeadLaser(): ModuleBase(MODULE_DEVICE_ID_LASER) {
-      power_limit_ = 100;
+		ToolHeadLaser(ModuleDeviceID id): ModuleBase(id) {
+      power_limit_pwm_ = 255;
       power_pwm_   = 0;
       power_val_   = 0;
       mac_index_   = MODULE_MAC_INDEX_INVALID;
-
       state_ = TOOLHEAD_LASER_STATE_OFFLINE;
       focus_ = TOOLHEAD_LASER_CAMERA_FOCUS_MAX / 1000;
-
       fan_state_ = TOOLHEAD_LASER_FAN_STATE_CLOSED;
       fan_tick_  = 0;
-
       msg_id_set_fan_   = MODULE_MESSAGE_ID_INVALID;
       msg_id_get_focus_ = MODULE_MESSAGE_ID_INVALID;
-
       timer_in_process_ = 0;
+
+      security_status_ = 0;
+      laser_temperature_ = 0;
+      imu_temperature_   = 0;
+      need_to_turnoff_laser_ = false;
+      need_to_tell_hmi_ = false;
+      laser_10w_status_ = LASER_10W_DISABLE;
+      laser_pwm_pin_checked_ = false;
+      pwm_pin_pullup_state_ = 0xff;
+      pwm_pin_pulldown_state_ = 0xff;
     }
 
     ErrCode Init(MAC_t &mac, uint8_t mac_index);
+    void TurnoffLaserIfNeeded();
 
     void TurnOn();
+    void PwmCtrlDirectly(uint8_t duty);
     void TurnOff();
-  
+
     void SetFanPower(uint8_t power);  // power 0 - 100
 
     void SetPower(float power);       // change power_val_ and power_pwm_ but not change actual output
@@ -128,6 +144,18 @@ class ToolHeadLaser: public ModuleBase {
     ErrCode ReadBluetoothVer();
     void SetCameraLight(uint8_t state);
 
+    ErrCode GetSecurityStatus(SSTP_Event_t &event);
+    ErrCode SendSecurityStatus();
+    ErrCode SendPauseStatus();
+    ErrCode SetAutoFocusLight(SSTP_Event_t &event);
+    ErrCode SetOnlineSyncId(SSTP_Event_t &event);
+    ErrCode GetOnlineSyncId(SSTP_Event_t &event);
+    ErrCode SetProtectTemp(SSTP_Event_t &event);
+    ErrCode LaserControl(uint8_t state);
+    ErrCode LaserGetHWVersion();
+    void TellSecurityStatus();
+    uint8_t LaserGetPwmPinState();
+    void LaserConfirmPinState();
     void Process();
 
     uint32_t mac(uint8_t sub_index = 0) { return canhost.mac(mac_index_); }
@@ -156,30 +184,57 @@ class ToolHeadLaser: public ModuleBase {
     ErrCode SetBluetoothInfo(LaserCameraCommand cmd, uint8_t *info, uint16_t length);
 
   private:
+    uint8_t *power_table_;
     uint8_t  mac_index_;
-
     uint16_t timer_in_process_;
-
     ToolHeadLaserState  state_;
-
     float power_val_;
-    float power_limit_;
-
+    uint16_t power_limit_pwm_;
     uint16_t power_pwm_;
-
     uint8_t  fan_state_;
     uint16_t fan_tick_;
+    uint16_t laser_10w_tick_ = 0;
 
     // save orignal value from module
     uint16_t focus_;
-
     message_id_t msg_id_set_fan_;
     message_id_t msg_id_get_focus_;
-
     UartHost esp32_;
+
+    bool laser_pwm_pin_checked_;
+    uint8_t pwm_pin_pullup_state_;
+    uint8_t pwm_pin_pulldown_state_;
+
+  public:
+    uint8_t security_status_;
+    int16_t roll_;
+    int16_t pitch_;
+    int8_t laser_temperature_;
+    int8_t imu_temperature_;
+    bool need_to_turnoff_laser_;
+    bool need_to_tell_hmi_;
+    LASER_10W_STATUS laser_10w_status_;
+  
+  // Laser Inline Power functions
+  public:
+    /**
+     * Inline power adds extra fields to the planner block
+     * to handle laser power and scale to movement speed.
+     */
+
+    // Force disengage planner power control
+    void InlineDisable();
+
+    // Set the power for subsequent movement blocks
+    void SetOutputInline(float power);
+
+    // Optimized TurnOn function for use from the Stepper ISR
+    void TurnOn_ISR(uint16_t power_pwm);
 };
 
 
-extern ToolHeadLaser laser;
+extern ToolHeadLaser *laser;
+extern ToolHeadLaser laser_1_6_w;
+extern ToolHeadLaser laser_10w;
 
 #endif  // #ifndef TOOLHEAD_LASER_H_

@@ -33,15 +33,14 @@ def pack_minor_image(image_type, start_id, end_id, version, input, output):
 
     # Construct full version
     if image_type == MINOR_IMAGE_TYPE_CONTROLLER:
-        full_version = 'Snapmaker_{}'.format(version.upper()).encode('UTF-8')
+        full_version = 'Snapmaker_{}'.format(version).encode('UTF-8')
     else:
-        full_version = 'Snapmaker_{}_{}'.format(version.upper(), date).encode('UTF-8')
+        full_version = 'Snapmaker_{}_{}'.format(version, date).encode('UTF-8')
     if len(full_version) >= 32:
-        version = version[:32]
+        full_version = full_version[:32]
     else:
-        for i in range(32 - len(full_version)):
-            full_version += b'\0'
-        full_version += b'\0'
+        full_version += b'\0' * (32 - len(full_version))
+    full_version += b'\0'
 
     with open(output, 'wb') as f:
         # Header (2048)
@@ -117,8 +116,12 @@ def pack_major_image(controller=None, module=None, screen=None, version=None):
         os.rename(major_image, major_image.with_suffix('.bin.old'))
 
     full_version = full_version.encode('ASCII')
-    for i in range(32 - len(full_version)):
-        full_version += b'\0'
+
+    if len(full_version) >= 31:
+        full_version = full_version[:31]
+    else:
+        full_version += b'\0' * (31 - len(full_version))
+    full_version += b'\0'
 
     if count == 0:
         raise RuntimeError("Please specify minor image to be packaged!")

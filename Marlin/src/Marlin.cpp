@@ -249,6 +249,11 @@ millis_t max_inactive_time, // = 0
   float s_home_offset[XN] = S_HOME_OFFSET_DEFAULT;
   float m_home_offset[XN] = M_HOME_OFFSET_DEFAULT;
   float l_home_offset[XN] = L_HOME_OFFSET_DEFAULT;
+
+  float print_min_planner_speed = MINIMUM_PRINT_PLANNER_SPEED;
+  float laser_min_planner_speed = MINIMUM_LASER_PLANNER_SPEED;
+  float cnc_min_planner_speed = MINIMUM_CNC_PLANNER_SPEED;
+
 #endif //ENABLED(SW_MACHINE_SIZE)
 
 uint32_t GRID_MAX_POINTS_X;
@@ -266,18 +271,7 @@ uint32_t ABL_TEMP_POINTS_Y;
  * ******************************** FUNCTIONS ********************************
  * ***************************************************************************
  */
-
-void reset_homeoffset() {
-  float s_home_offset_def[XN] = S_HOME_OFFSET_DEFAULT;
-  float m_home_offset_def[XN] = M_HOME_OFFSET_DEFAULT;
-  float l_home_offset_def[XN] = L_HOME_OFFSET_DEFAULT;
-
-  LOOP_XN(i) {
-    s_home_offset[i] = s_home_offset_def[i];
-    m_home_offset[i] = m_home_offset_def[i];
-    l_home_offset[i] = l_home_offset_def[i];
-  }
-
+void set_homeoffset() {
   LOOP_XYZ(i) {
     switch (linear_p->machine_size()) {
       case MACHINE_SIZE_A150:
@@ -293,6 +287,44 @@ void reset_homeoffset() {
         break;
     }
   }
+}
+
+void reset_homeoffset() {
+  float s_home_offset_def[XN] = S_HOME_OFFSET_DEFAULT;
+  float m_home_offset_def[XN] = M_HOME_OFFSET_DEFAULT;
+  float l_home_offset_def[XN] = L_HOME_OFFSET_DEFAULT;
+
+  LOOP_XN(i) {
+    s_home_offset[i] = s_home_offset_def[i];
+    m_home_offset[i] = m_home_offset_def[i];
+    l_home_offset[i] = l_home_offset_def[i];
+  }
+
+  set_homeoffset();
+}
+
+void set_min_planner_speed() {
+  switch (ModuleBase::toolhead()) {
+    case MODULE_TOOLHEAD_3DP:
+      planner.min_planner_speed = print_min_planner_speed;
+      break;
+    case MODULE_TOOLHEAD_CNC:
+      planner.min_planner_speed = cnc_min_planner_speed;
+      break;
+    case MODULE_TOOLHEAD_LASER:
+      planner.min_planner_speed = laser_min_planner_speed;
+      break;
+    default:
+      planner.min_planner_speed = print_min_planner_speed;
+  }
+  SERIAL_ECHOLNPAIR("set min_planner_speed:", planner.min_planner_speed);
+}
+
+void reset_min_planner_speed() {
+  print_min_planner_speed = MINIMUM_PRINT_PLANNER_SPEED;
+  laser_min_planner_speed = MINIMUM_LASER_PLANNER_SPEED;
+  cnc_min_planner_speed = MINIMUM_CNC_PLANNER_SPEED;
+  set_min_planner_speed();
 }
 
 void setup_killpin() {
@@ -808,9 +840,6 @@ void idle(
   #if ENABLED(PRUSA_MMU2)
     mmu2.mmuLoop();
   #endif
-
-  if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
-    vTaskDelay(pdMS_TO_TICKS(1));
 }
 
 /**

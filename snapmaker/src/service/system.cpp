@@ -116,10 +116,9 @@ ErrCode SystemService::PauseTrigger(TriggerSource type)
     // if we are waiting for heatup, abort the waiting
     wait_for_heatup = false;
     // save the command line of heating Gcode
-    pl_recovery.SaveCmdLine(CommandLine[cmd_queue_index_r]);
-
     taskEXIT_CRITICAL();
   }
+  pl_recovery.SaveCmdLine(CommandLine[cmd_queue_index_r]);
 
   // clear event in queue to marlin
   xMessageBufferReset(sm2_handle->event_queue);
@@ -149,12 +148,12 @@ ErrCode SystemService::PreProcessStop() {
 
   print_job_timer.stop();
 
-  if (ModuleBase::toolhead() == MODULE_TOOLHEAD_LASER) {
-    laser.TurnOff();
+  if ((ModuleBase::toolhead() == MODULE_TOOLHEAD_LASER) || (ModuleBase::toolhead() == MODULE_TOOLHEAD_LASER_10W)) {
+    laser->TurnOff();
     is_waiting_gcode = false;
     is_laser_on = false;
   }
-
+  gocde_pack_start_line(0);
   return E_SUCCESS;
 }
 
@@ -349,6 +348,7 @@ ErrCode SystemService::ResumeTrigger(TriggerSource source) {
 
   case MODULE_TOOLHEAD_CNC:
   case MODULE_TOOLHEAD_LASER:
+  case MODULE_TOOLHEAD_LASER_10W:
     if (enclosure.DoorOpened()) {
       LOG_E("Door is opened!\n");
       fault_flag_ |= FAULT_FLAG_DOOR_OPENED;
@@ -382,6 +382,7 @@ ErrCode SystemService::ResumeProcess() {
     break;
 
   case MODULE_TOOLHEAD_LASER:
+  case MODULE_TOOLHEAD_LASER_10W:
     resume_laser();
     break;
 
@@ -443,15 +444,16 @@ ErrCode SystemService::ResumeOver() {
 
   case MODULE_TOOLHEAD_CNC:
   case MODULE_TOOLHEAD_LASER:
+  case MODULE_TOOLHEAD_LASER_10W:
     if (enclosure.DoorOpened()) {
       LOG_E("Door is opened, please close the door!\n");
       PauseTrigger(TRIGGER_SOURCE_DOOR_OPEN);
       return E_DOOR_OPENED;
     }
 
-    if (MODULE_TOOLHEAD_LASER == ModuleBase::toolhead()) {
+    if ((MODULE_TOOLHEAD_LASER == ModuleBase::toolhead()) || (MODULE_TOOLHEAD_LASER_10W == ModuleBase::toolhead())) {
       if (pl_recovery.cur_data_.laser_pwm > 0)
-        laser.TurnOn();
+        laser->TurnOn();
     }
     break;
 
@@ -518,17 +520,27 @@ SysStage SystemService::GetCurrentStage() {
  * 4 - pause with port
  */
 uint8_t SystemService::MapCurrentStatusForSC() {
-  SysStage stage = GetCurrentStage();
-  uint8_t status;
+  uint8_t status = 0;
 
-  // idle for neither working and pause to screen
-  if (stage != SYSTAGE_PAUSE && stage != SYSTAGE_WORK)
-    return 0;
+  switch (cur_status_) {
 
-  if (stage == SYSTAGE_WORK)
+  case SYSTAT_WORK:
+  case SYSTAT_RESUME_TRIG:
+  case SYSTAT_RESUME_MOVING:
+  case SYSTAT_RESUME_WAITING:
+  case SYSTAT_PAUSE_TRIG:
     status = 3;
-  else
+    break;
+
+  case SYSTAT_PAUSE_STOPPED:
+  case SYSTAT_PAUSE_FINISH:
     status = 4;
+    break;
+
+  default:
+    status = 0;
+    break;
+  }
 
   return status;
 }
@@ -592,6 +604,7 @@ ErrCode SystemService::StartWork(TriggerSource s) {
     break;
 
   case MODULE_TOOLHEAD_LASER:
+  case MODULE_TOOLHEAD_LASER_10W:
     is_laser_on = false;
     is_waiting_gcode = false;
   case MODULE_TOOLHEAD_CNC:
@@ -600,8 +613,14 @@ ErrCode SystemService::StartWork(TriggerSource s) {
       LOG_E("Door is opened!\n");
       return E_DOOR_OPENED;
     }
-    if (axes_homed(Z_AXIS) == false)
-      process_cmd_imd("G28 Z");
+
+    if (is_homing()) {
+      LOG_E("Is homing!\n");
+      return E_IS_HOMING;
+    } else if (all_axes_homed() == false) {
+      LOG_E("No homed!\n");
+      return E_NO_HOMED;
+    }
 
     // set to defualt power, but not turn on Motor
     if (MODULE_TOOLHEAD_CNC == ModuleBase::toolhead()) {
@@ -1499,8 +1518,10 @@ ErrCode SystemService::CheckIfSendWaitEvent() {
   ErrCode err;
 
   if (GetCurrentStatus() == SYSTAT_WORK) {
-    // and no movement planned
-    if(!planner.movesplanned()) {
+    if (hmi_gcode_pack_mode()) {
+      check_and_request_gcode_again();
+    }
+    else if(!planner.movesplanned()) { // and no movement planned
       if ((hmi_cmd_timeout() + 1000) > millis()) {
         return E_SUCCESS;
       }
@@ -1517,9 +1538,9 @@ ErrCode SystemService::CheckIfSendWaitEvent() {
         hmi.Send(event);
         if (!is_waiting_gcode) {
           is_waiting_gcode = true;
-          if (laser.tim_pwm() > 0) {
+          if (laser->tim_pwm() > 0) {
             is_laser_on = true;
-            laser.TurnOff();
+            laser->TurnOff();
           }
         }
       }
@@ -1582,7 +1603,7 @@ ErrCode SystemService::SendStatus(SSTP_Event_t &event) {
   hmi.ToPDUBytes((uint8_t *)&sta.feedrate, (uint8_t *)&tmp_i16, 2);
 
   // laser power
-  tmp_u32 = laser.power();
+  tmp_u32 = laser->power();
   hmi.ToPDUBytes((uint8_t *)&sta.laser_power, (uint8_t *)&tmp_u32, 2);
 
   // RPM of CNC
@@ -1647,9 +1668,9 @@ ErrCode SystemService::SendStatus(SSTP_Event_t &event) {
   tmp_i16 = (int16_t)tmp_f32;
   HWORD_TO_PDU_BYTES_INDE_MOVE(buff, tmp_i16, i);
 
-  if (ModuleBase::toolhead() == MACHINE_TYPE_LASER) {
+  if (ModuleBase::toolhead() == MACHINE_TYPE_LASER || ModuleBase::toolhead() == MACHINE_TYPE_LASER_10W) {
     // laser power
-    tmp_u32 = (uint32_t)(laser.power() * 1000);
+    tmp_u32 = (uint32_t)(laser->power() * 1000);
   } else if (ModuleBase::toolhead() == MACHINE_TYPE_CNC) {
 
     // RPM of CNC
@@ -1671,7 +1692,13 @@ ErrCode SystemService::SendStatus(SSTP_Event_t &event) {
 
   // executor type
   sta.executor_type = ModuleBase::toolhead();
-
+  i += 3;
+  if (cur_status_ > SYSTAT_IDLE) {
+    tmp_u32 = pl_recovery.LastLine();
+  } else {
+    tmp_u32 = 0;
+  }
+  WORD_TO_PDU_BYTES_INDEX_MOVE(buff, tmp_u32, i);
   return hmi.Send(event);
 }
 #endif
@@ -1696,6 +1723,23 @@ ErrCode SystemService::SendException(uint32_t fault) {
   return hmi.Send(event);
 }
 
+ErrCode SystemService::SendSecurityStatus () {
+  if (ModuleBase::toolhead() == MODULE_TOOLHEAD_LASER_10W) {
+    laser->SendSecurityStatus();
+  }
+
+  return E_SUCCESS;
+}
+
+ErrCode SystemService::SendPause() {
+  SSTP_Event_t event = {EID_SYS_CTRL_ACK, SYSCTL_OPC_PAUSE};
+  uint8_t buff[1] = {0};
+
+  event.length = 1;
+  event.data = buff;
+
+  return hmi.Send(event);
+}
 
 ErrCode SystemService::ChangeSystemStatus(SSTP_Event_t &event) {
   ErrCode err = E_SUCCESS;
@@ -1734,7 +1778,7 @@ ErrCode SystemService::ChangeSystemStatus(SSTP_Event_t &event) {
         else {
           current_line_ = 0;
         }
-
+        gocde_pack_start_line(current_line_);
         SNAP_DEBUG_SET_GCODE_LINE(current_line_);
         LOG_I("RESUME over\n");
         return E_SUCCESS;
@@ -1871,6 +1915,8 @@ ErrCode SystemService::RecoverFromPowerLoss(SSTP_Event_t &event) {
         current_line_ =  pl_recovery.cur_data_.FilePosition - 1;
       else
         current_line_ = 0;
+      // Batch sending requires the controller to actively request the next line
+      gocde_pack_start_line(current_line_);
       SNAP_DEBUG_SET_GCODE_LINE(current_line_);
       pl_recovery.SaveCmdLine(pl_recovery.cur_data_.FilePosition);
       LOG_I("trigger RESTORE: ok\n");
@@ -1893,7 +1939,9 @@ ErrCode SystemService::SendHomeAndCoordinateStatus(SSTP_Event_t &event) {
 
   event.data = buff;
 
-  if (all_axes_homed()) {
+  if (is_homing()) {
+    buff[i++] = 2;
+  } else if (all_axes_homed()) {
     buff[i++] = 0;
   }
   else {
@@ -1987,7 +2035,7 @@ ErrCode SystemService::ChangeRuntimeEnv(SSTP_Event_t &event) {
 
   case RENV_TYPE_LASER_POWER:
     LOG_I("new laser power: %.2f\n", param);
-    if (MODULE_TOOLHEAD_LASER != ModuleBase::toolhead()) {
+    if ((MODULE_TOOLHEAD_LASER != ModuleBase::toolhead()) && (MODULE_TOOLHEAD_LASER_10W != ModuleBase::toolhead())) {
       ret = E_INVALID_STATE;
       break;
     }
@@ -1995,10 +2043,10 @@ ErrCode SystemService::ChangeRuntimeEnv(SSTP_Event_t &event) {
     if (param > 100 || param < 0)
       ret = E_PARAM;
     else {
-      if (laser.tim_pwm() > 0)
-        laser.SetOutput(param);
+      if (laser->tim_pwm() > 0)
+        laser->SetOutput(param);
       else
-        laser.SetPower(param);
+        laser->SetPower(param);
     }
     break;
 
@@ -2144,17 +2192,19 @@ ErrCode SystemService::CallbackPreQS(QuickStopSource source) {
 
     // reset the status of filament monitor
     runout.reset();
-
     // make sure laser is off
-    // won't turn off laser in pl_recovery.SaveEnv(), it's call by stepper ISR
-    // because it may call CAN transmisson function
-    if (ModuleBase::toolhead() == MODULE_TOOLHEAD_LASER) {
-      laser.TurnOff();
+    if ((ModuleBase::toolhead() == MODULE_TOOLHEAD_LASER) || (ModuleBase::toolhead() == MODULE_TOOLHEAD_LASER_10W)) {
+      laser->TurnOff();
     }
     break;
 
   case QS_SOURCE_STOP:
     PreProcessStop();
+    break;
+
+  case QS_SOURCE_SECURITY:
+    PreProcessStop();
+    SendSecurityStatus();
     break;
 
   default:
@@ -2196,6 +2246,18 @@ ErrCode SystemService::CallbackPostQS(QuickStopSource source) {
     cur_status_ = SYSTAT_IDLE;
 
     LOG_I("Finish stop\n\n");
+    break;
+
+  case QS_SOURCE_SECURITY:
+    FinishSystemStatusChange(SYSCTL_OPC_PAUSE, 0);
+    pause_source_ = TRIGGER_SOURCE_NONE;
+
+    LOG_I("Finish pause\n\n");
+    cur_status_ = SYSTAT_PAUSE_FINISH;
+    // notify HMI
+    // SendPause();
+
+    LOG_I("Finish handle protection\n");
     break;
 
   default:

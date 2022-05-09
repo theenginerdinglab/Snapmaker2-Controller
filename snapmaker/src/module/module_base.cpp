@@ -36,6 +36,7 @@
 #include "purifier.h"
 
 // marlin headers
+#include "src/Marlin.h"
 #include "src/inc/MarlinConfig.h"
 #include "src/feature/bedlevel/abl/abl.h"
 #include "src/module/configuration_store.h"
@@ -46,13 +47,14 @@ extern ToolHead3DP printer_single;
 ModuleBase *static_modules[] = {
   &linear,
   &printer_single,
-  &laser,
+  &laser_1_6_w,
   &cnc,
   &enclosure,
   &emergency_stop,
   &linear_tmc,
   &rotaryModule,
   &purifier,
+  &laser_10w,
   NULL
 };
 
@@ -312,6 +314,7 @@ void ModuleBase::SetToolhead(ModuleToolHeadType toolhead) {
   }
 
   toolhead_ = toolhead;
+  set_min_planner_speed();
   if (need_saved)
     settings.save();
 }

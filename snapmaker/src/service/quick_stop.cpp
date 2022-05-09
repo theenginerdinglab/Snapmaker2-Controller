@@ -32,6 +32,7 @@
 #include "src/module/temperature.h"
 #include "src/module/printcounter.h"
 #include "src/feature/bedlevel/bedlevel.h"
+#include <src/gcode/gcode.h>
 #include HAL_PATH(src/HAL, HAL_watchdog_STM32F1.h)
 
 #define CNC_SAFE_HIGH_DIFF 30  // Bed to CNC head height. mm
@@ -57,7 +58,7 @@ void QuickStopService::Trigger(QuickStopSource new_source, bool from_isr /*=fals
     taskENTER_CRITICAL();
     DISABLE_TEMPERATURE_INTERRUPT();
   }
-
+  homing_is_interrupted_ = is_homing();
   if (new_source == QS_SOURCE_STOP_BUTTON) {
     source_ = new_source;
     state_ = QS_STA_STOPPED;
@@ -68,7 +69,7 @@ void QuickStopService::Trigger(QuickStopSource new_source, bool from_isr /*=fals
     state_ = QS_STA_TRIGGERED;
 
     // to stop planning movement
-    planner.cleaning_buffer_counter = 2000;
+    planner.cleaning_buffer_counter = 100;
   } else {
     if (new_source == QS_SOURCE_POWER_LOSS) {
       pre_source_ = source_;
@@ -118,6 +119,9 @@ bool QuickStopService::CheckInISR(block_t *blk) {
     case QS_SOURCE_POWER_LOSS:
       TurnOffPower();
 
+    case QS_SOURCE_SECURITY:
+      HandleProtection();
+
     /*
     * triggered by PAUSE, just save env and switch to next state
     */
@@ -157,6 +161,7 @@ bool QuickStopService::CheckInISR(block_t *blk) {
       break;
 
     case QS_SOURCE_POWER_LOSS:
+    case QS_SOURCE_SECURITY:
     case QS_SOURCE_PAUSE:
       state_ = QS_STA_SAVED_ENV;
       break;
@@ -188,7 +193,7 @@ bool QuickStopService::CheckInISR(block_t *blk) {
    * if power loss happened when parking for PAUSE, we need to write env into flash
    */
   case QS_STA_PARKING:
-    if ((source_ == QS_SOURCE_POWER_LOSS) && (pre_source_ == QS_SOURCE_PAUSE) && !wrote_flash_) {
+    if ((source_ == QS_SOURCE_POWER_LOSS) && ((pre_source_ == QS_SOURCE_PAUSE) || (pre_source_ == QS_SOURCE_SECURITY)) && !wrote_flash_) {
       TurnOffPower();
       pl_recovery.WriteFlash();
       wrote_flash_ = true;
@@ -241,6 +246,7 @@ void QuickStopService::Park() {
     break;
 
   case MODULE_TOOLHEAD_LASER:
+  case MODULE_TOOLHEAD_LASER_10W:
     // In the case of laser, we don't raise Z.
     if (source_ == QS_SOURCE_STOP) {
       move_to_limited_z(Z_MAX_POS, 30);
@@ -290,8 +296,17 @@ void QuickStopService::TurnOffPower() {
 
   BreathLightClose();
 
-  if (ModuleBase::toolhead() == MODULE_TOOLHEAD_LASER) {
-      laser.TurnOff();
+  if ((ModuleBase::toolhead() == MODULE_TOOLHEAD_LASER) || (ModuleBase::toolhead() == MODULE_TOOLHEAD_LASER_10W)) {
+    // The laser movement stops immediately with no risk of damaging the model
+    disable_power_domain(POWER_DOMAIN_1);
+  }
+}
+
+void QuickStopService::HandleProtection() {
+  if (source_ != QS_SOURCE_SECURITY) return;
+
+  if (ModuleBase::toolhead() == MODULE_TOOLHEAD_LASER_10W) {
+      // don't do nothing
   }
 }
 
@@ -308,8 +323,9 @@ void QuickStopService::EmergencyStop() {
       printer1->SetFan(0, 0);
       break;
     case MACHINE_TYPE_LASER:
-      laser.SetCameraLight(0);
-      laser.SetFanPower(0);
+    case MACHINE_TYPE_LASER_10W:
+      laser->SetCameraLight(0);
+      laser->SetFanPower(0);
       break;
     case MACHINE_TYPE_UNDEFINE:
       break;
@@ -360,6 +376,9 @@ void QuickStopService::Process() {
     EmergencyStop();
   } else {
     // parking
+    if (homing_is_interrupted_) {
+      process_cmd_imd("G28");
+    }
     Park();
   }
 
@@ -379,7 +398,7 @@ void QuickStopService::Process() {
 
   // tell system controller we have parked
   systemservice.CallbackPostQS(source_);
-
+  homing_is_interrupted_ = false;
   state_ = QS_STA_IDLE;
   source_ = QS_SOURCE_IDLE;
   pre_source_ = QS_SOURCE_IDLE;

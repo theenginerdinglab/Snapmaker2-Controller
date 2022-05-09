@@ -472,6 +472,8 @@ private:
     static void M28();
     static void M29();
     static void M30();
+  #else
+    static void M25();
   #endif
 
   static void M31();
@@ -887,6 +889,7 @@ private:
 
   static void M1010();
   static void M1011();
+  static void M1012();
 
   static void M1028();
   static void M1029();
@@ -896,6 +899,8 @@ private:
   static void M2000();
 
   static void M2001();
+
+  static void M2002();
 
   static void T(const uint8_t tool_index);
 

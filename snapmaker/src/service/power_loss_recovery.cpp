@@ -378,8 +378,10 @@ int PowerLossRecovery::SaveEnv(void) {
 		break;
 
 	case MODULE_TOOLHEAD_LASER:
-		cur_data_.laser_percent = laser.power();
-		cur_data_.laser_pwm = laser.power_pwm();
+	case MODULE_TOOLHEAD_LASER_10W:
+		cur_data_.laser_percent = laser->power();
+		cur_data_.laser_pwm = laser->tim_pwm();
+	    laser->TurnOff();
 	break;
 
   case MODULE_TOOLHEAD_3DP:
@@ -518,7 +520,7 @@ void PowerLossRecovery::ResumeCNC() {
 
 void PowerLossRecovery::ResumeLaser() {
 	// make sure laser is disable
-	laser.TurnOff();
+	laser->TurnOff();
 
 	// homing and restore workspace
 	RestoreWorkspace();
@@ -537,7 +539,7 @@ void PowerLossRecovery::ResumeLaser() {
 	cur_data_.laser_pwm = pre_data_.laser_pwm;
 
 	// just change laser power but not enable output
-	laser.SetPower(pre_data_.laser_percent);
+	laser->SetPower(pre_data_.laser_percent);
 }
 
 
@@ -607,6 +609,7 @@ ErrCode PowerLossRecovery::ResumeWork() {
 		break;
 
 	case MODULE_TOOLHEAD_LASER:
+	case MODULE_TOOLHEAD_LASER_10W:
 		if (enclosure.DoorOpened()) {
 			LOG_E("trigger RESTORE: failed, door is open\n");
 			return E_DOOR_OPENED;

@@ -559,7 +559,10 @@
 // Minimum planner junction speed. Sets the default minimum speed the planner plans for at the end
 // of the buffer and all stops. This should not be much greater than zero and should only be changed
 // if unwanted behavior is observed on a user's machine when running at very slow speeds.
-#define MINIMUM_PLANNER_SPEED 0.05 // (mm/s)
+// #define MINIMUM_PLANNER_SPEED 0.05 // (mm/s)
+#define MINIMUM_PRINT_PLANNER_SPEED 0.05 // (mm/s)
+#define MINIMUM_LASER_PLANNER_SPEED 3 // (mm/s)
+#define MINIMUM_CNC_PLANNER_SPEED   0.05 // (mm/s)
 
 //
 // Backlash Compensation
@@ -1186,6 +1189,10 @@
 #define BUFSIZE 4
 #define HMI_BUFSIZE 8
 #define INVALID_CMD_LINE  0xFFFFFFFFU
+
+// The cache size used when transferring Gcode in bulk
+#define HMI_GCODE_PACK_SIZE 512
+#define HMI_GCODE_PACK_BUF_COUNT 2
 
 // Transmission to Host Buffer Size
 // To save 386 bytes of PROGMEM (and TX_BUFFER_SIZE+3 bytes of RAM) set to 0.

@@ -35,20 +35,25 @@
 #include "src/module/planner.h"
 #include "rotary_module.h"
 #include "src/module/stepper.h"
+#include "../service/system.h"
+#include "toolhead_3dp.h"
 
 
-#define LASER_CLOSE_FAN_DELAY     (120)
+#define LASER_CLOSE_FAN_DELAY     (300)
+#define LASER_10W_DISABLE_DELAY     (2)
 
 #define TimSetPwm(n)  Tim1SetCCR4(n)
 #define TimGetPwm()  Tim1GetCCR4()
 
-ToolHeadLaser laser;
+ToolHeadLaser laser_1_6_w(MODULE_DEVICE_ID_1_6_W_LASER);
+ToolHeadLaser laser_10w(MODULE_DEVICE_ID_10W_LASER);
+ToolHeadLaser *laser = &laser_1_6_w;
 
 extern void Tim1SetCCR4(uint16_t pwm);
 extern uint16_t Tim1GetCCR4();
 extern void Tim1PwmInit();
 
-static __attribute__((section(".data"))) uint8_t power_table[]= {
+static __attribute__((section(".data"))) uint8_t power_table_1_6W[]= {
   0,
   20,22,24,26,28,30,31,33,35,37,39,41,43,45,47,49,51,53,54,56,58,60,63,65,67,69,71,73,75,77,79,82,84,86,88,90,93,95,97,
   100,102,103,106,109,111,113,116,119,121,123,125,128,130,133,135,138,140,143,145,148,150,153,156,158,161,164,166,169,
@@ -56,19 +61,52 @@ static __attribute__((section(".data"))) uint8_t power_table[]= {
   247,251,255
 };
 
+static __attribute__((section(".data"))) uint8_t power_table_10W[]= {
+  0, 20, 27, 29, 32, 35, 37, 40, 42, 45,
+  47, 49, 51, 54, 56, 59, 61, 63, 65, 68,
+  70, 72, 75, 77, 79, 82, 84, 87, 90, 92,
+  94, 97, 99, 101, 103, 106, 108, 110, 112, 115,
+  117, 120, 122, 124, 126, 128, 131, 133, 135, 138,
+  140, 142, 144, 147, 149, 151, 153, 156, 158, 161,
+  163, 166, 168, 171, 173, 176, 178, 180, 182, 185,
+  188, 190, 192, 193, 195, 198, 200, 202, 204, 207,
+  209, 212, 214, 216, 218, 221, 224, 226, 228, 230,
+  233, 235, 239, 241, 242, 245, 247, 250, 252, 254,
+  255
+};
+
 static void CallbackAckLaserFocus(CanStdDataFrame_t &cmd) {
-  laser.focus(cmd.data[0]<<8 | cmd.data[1]);
+  laser->focus(cmd.data[0]<<8 | cmd.data[1]);
 }
 
+static void CallbackAckReportSecurity(CanStdDataFrame_t &cmd) {
+  laser->security_status_ = cmd.data[0];
+  laser->pitch_ = (cmd.data[1] << 8) | cmd.data[2];
+  laser->roll_ = (cmd.data[3] << 8) | cmd.data[4];
+  laser->laser_temperature_ = cmd.data[5];
+  laser->imu_temperature_ = (int8_t)cmd.data[6];
+
+  laser->need_to_tell_hmi_ = true;
+
+  if (laser->security_status_ != 0) {
+    laser->need_to_turnoff_laser_ = true;
+
+    if (systemservice.GetCurrentStage() == SYSTAGE_WORK || systemservice.GetCurrentStage() == SYSTAGE_PAUSE) {
+      quickstop.Trigger(QS_SOURCE_SECURITY, true);
+    } else if (laser->laser_10w_status_ == LASER_10W_ENABLE) {
+      laser->TurnOff();
+    }
+  }
+}
 
 ErrCode ToolHeadLaser::Init(MAC_t &mac, uint8_t mac_index) {
   ErrCode ret;
 
   CanExtCmd_t cmd;
-  uint8_t     func_buffer[16];
+  uint8_t     func_buffer[2*12+2];
 
   Function_t    function;
-  message_id_t  message_id[4];
+  message_id_t  message_id[12];
 
   if (axis_to_port[E_AXIS] != PORT_8PIN_1) {
     LOG_E("toolhead Laser failed: Please use the <M1029 E1> set E port\n");
@@ -106,9 +144,11 @@ ErrCode ToolHeadLaser::Init(MAC_t &mac, uint8_t mac_index) {
     if (function.id == MODULE_FUNC_GET_LASER_FOCUS) {
       message_id[i]     = canhost.RegisterFunction(function, CallbackAckLaserFocus);
       msg_id_get_focus_ = message_id[i];
-    }
-    else
+    } else if (function.id == MODULE_FUNC_REPORT_SECURITY_STATUS) {
+      message_id[i] = canhost.RegisterFunction(function, CallbackAckReportSecurity);
+    } else {
       message_id[i] = canhost.RegisterFunction(function, NULL);
+    }
 
     if (function.id == MODULE_FUNC_SET_FAN1)
       msg_id_set_fan_ = message_id[i];
@@ -122,10 +162,31 @@ ErrCode ToolHeadLaser::Init(MAC_t &mac, uint8_t mac_index) {
   mac_index_ = mac_index;
   state_     = TOOLHEAD_LASER_STATE_OFF;
 
+  laser = this;
   // set toolhead
-  SetToolhead(MODULE_TOOLHEAD_LASER);
+  power_table_ = power_table_1_6W;
+  if (laser->device_id_ == MODULE_DEVICE_ID_1_6_W_LASER) {
+    power_table_ = power_table_1_6W;
+    SetToolhead(MODULE_TOOLHEAD_LASER);
+  } else if (laser->device_id_ == MODULE_DEVICE_ID_10W_LASER) {
+    power_table_ = power_table_10W;
+    SetToolhead(MODULE_TOOLHEAD_LASER_10W);
+  }
 
   return E_SUCCESS;
+}
+
+void ToolHeadLaser::TurnoffLaserIfNeeded() {
+  bool is_disable_laser = (laser_10w_status_ == LASER_10W_WAIT_DISABLE) && (++laser_10w_tick_ > LASER_10W_DISABLE_DELAY);
+  if (laser->need_to_turnoff_laser_) {
+    // The module is exception and needs to be turn off
+    laser->need_to_turnoff_laser_ = false;
+    TurnOff();
+    is_disable_laser = true;
+  }
+  if (is_disable_laser) {
+    LaserControl(0);
+  }
 }
 
 uint16_t ToolHeadLaser::tim_pwm() {
@@ -139,23 +200,47 @@ void ToolHeadLaser::TurnOn() {
   if (state_ == TOOLHEAD_LASER_STATE_OFFLINE)
     return;
 
+  if (laser->device_id_ == MODULE_DEVICE_ID_10W_LASER && laser->security_status_ != 0) {
+    return;
+  }
+
+  if (laser->device_id_ == MODULE_DEVICE_ID_10W_LASER) {
+    if (laser_10w_status_ == LASER_10W_DISABLE) {
+      // Send the enable command only when the power is disabled
+      LaserControl(1);
+    }
+    // Stop waiting disable
+    laser_10w_status_ = LASER_10W_ENABLE;
+  }
   state_ = TOOLHEAD_LASER_STATE_ON;
   CheckFan(power_pwm_);
   tim_pwm(power_pwm_);
 }
 
+void ToolHeadLaser::PwmCtrlDirectly(uint8_t duty) {
+  tim_pwm(duty);
+}
 
 void ToolHeadLaser::TurnOff() {
   if (state_ == TOOLHEAD_LASER_STATE_OFFLINE)
     return;
 
+  if (laser->device_id_ == MODULE_DEVICE_ID_10W_LASER) {
+    if (laser_10w_status_ != LASER_10W_DISABLE) {
+      laser_10w_status_ = LASER_10W_WAIT_DISABLE;
+      laser_10w_tick_ = 0;
+    }
+  }
   state_ = TOOLHEAD_LASER_STATE_OFF;
   CheckFan(0);
   tim_pwm(0);
 }
 
-
 void ToolHeadLaser::SetOutput(float power) {
+  if (laser->device_id_ == MODULE_DEVICE_ID_10W_LASER && laser->security_status_ != 0) {
+    return;
+  }
+
   SetPower(power);
   TurnOn();
 }
@@ -170,13 +255,13 @@ void ToolHeadLaser::SetPower(float power) {
 
   power_val_ = power;
 
-  if (power > power_limit_)
-    power = power_limit_;
-
   integer = (int)power;
   decimal = power - integer;
 
-  power_pwm_ = (uint16_t)(power_table[integer] + (power_table[integer + 1] - power_table[integer]) * decimal);
+  power_pwm_ = (uint16_t)(power_table_[integer] + (power_table_[integer + 1] - power_table_[integer]) * decimal);
+
+  if (power_pwm_ > power_limit_pwm_)
+    power_pwm_ = power_limit_pwm_;
 }
 
 
@@ -186,10 +271,12 @@ void ToolHeadLaser::SetPowerLimit(float limit) {
   if (limit > TOOLHEAD_LASER_POWER_NORMAL_LIMIT)
     limit = TOOLHEAD_LASER_POWER_NORMAL_LIMIT;
 
-  power_limit_ = limit;
+  // Compute limit PWM value
+  power_limit_pwm_ = 255;
+  SetPower(limit);
+  power_limit_pwm_ = power_pwm_;
 
-  SetPower(power_val_);
-  power_val_ = cur_power;
+  SetPower(cur_power);
 
   // check if we need to change current output
   if (state_ == TOOLHEAD_LASER_STATE_ON)
@@ -683,10 +770,267 @@ void ToolHeadLaser::SetCameraLight(uint8_t state) {
   LOG_I("set Laser Camera light:%d!\n", state);
 }
 
+ErrCode ToolHeadLaser::SetAutoFocusLight(SSTP_Event_t &event) {
+  CanStdFuncCmd_t cmd;
+  uint8_t can_buffer[1];
+
+  switch (event.data[0]) {
+  case 0:
+    can_buffer[0] = 0;
+    break;
+
+  case 1:
+    can_buffer[0] = 1;
+    break;
+
+  default:
+    return E_PARAM;
+  }
+
+  cmd.id        = MODULE_FUNC_SET_AUTOFOCUS_LIGHT;
+  cmd.data      = can_buffer;
+  cmd.length    = 1;
+
+
+  uint8_t buff[1];
+
+  if (canhost.SendStdCmdSync(cmd, 2000) == E_SUCCESS) {
+    buff[0] = 0;
+  } else {
+    buff[0] = 1;
+  }
+
+  SSTP_Event_t event_hmi = {EID_SETTING_ACK, SETTINGS_OPC_SET_AUTOFOCUS_LIGHT};
+  event_hmi.length = 1;
+  event_hmi.data = buff;
+
+  return hmi.Send(event_hmi);
+}
+
+ErrCode ToolHeadLaser::GetSecurityStatus(SSTP_Event_t &event) {
+  CanStdFuncCmd_t cmd;
+
+  cmd.id        = MODULE_FUNC_REPORT_SECURITY_STATUS;
+  cmd.data      = NULL;
+  cmd.length    = 0;
+  return canhost.SendStdCmd(cmd);
+}
+
+ErrCode ToolHeadLaser::SendSecurityStatus() {
+  SSTP_Event_t event = {EID_SYS_CTRL_ACK, SYSCTL_OPC_SECURITY_STATUS};
+  uint8_t buff[6];
+
+  buff[0] = laser->security_status_;
+  buff[1] = laser->laser_temperature_;
+  buff[2] = laser->roll_ >> 8;
+  buff[3] = laser->roll_ & 0xff;
+  buff[4] = laser->pitch_ >> 8;
+  buff[5] = laser->pitch_ & 0xff;
+
+  event.length = 6;
+  event.data = buff;
+
+  return hmi.Send(event);
+}
+
+ErrCode ToolHeadLaser::SendPauseStatus() {
+  SSTP_Event_t event = {EID_SYS_CTRL_ACK, SYSCTL_OPC_PAUSE};
+
+  event.length = 0;
+  event.data = NULL;
+
+  return hmi.Send(event);
+}
+
+ErrCode ToolHeadLaser::SetOnlineSyncId(SSTP_Event_t &event) {
+  CanStdFuncCmd_t cmd;
+  uint8_t can_buffer[5];
+
+  can_buffer[0] = 1;
+  can_buffer[1] = event.data[0];
+  can_buffer[2] = event.data[1];
+  can_buffer[3] = event.data[2];
+  can_buffer[4] = event.data[3];
+  cmd.id        = MODULE_FUNC_ONLINE_SYNC;
+  cmd.data      = can_buffer;
+  cmd.length    = 5;
+
+  canhost.SendStdCmd(cmd);
+
+  SSTP_Event_t event_hmi = {EID_SETTING_ACK, SETTINGS_OPC_SET_ONLINE_SYNC_ID};
+  uint8_t buff[1] = {0};
+  event_hmi.length = 1;
+  event_hmi.data = buff;
+
+  return hmi.Send(event_hmi);
+}
+
+ErrCode ToolHeadLaser::GetOnlineSyncId(SSTP_Event_t &event) {
+  CanStdFuncCmd_t cmd;
+  uint8_t can_buffer[1];
+
+  can_buffer[0] = 0;
+  cmd.id        = MODULE_FUNC_ONLINE_SYNC;
+  cmd.data      = can_buffer;
+  cmd.length    = 1;
+
+  ErrCode ret;
+  ret = canhost.SendStdCmdSync(cmd, 2000);
+  if (ret != E_SUCCESS) {
+    return ret;
+  }
+
+  LOG_I("get online sync id: 0x%x\n", (cmd.data[0] | cmd.data[1] << 8 | cmd.data[2] << 16 | cmd.data[3] << 24));
+
+  SSTP_Event_t event_tmp = {EID_SETTING_ACK, SETTINGS_OPC_GET_ONLINE_SYNC_ID};
+  uint8_t buff[4];
+
+  buff[0] = cmd.data[0];
+  buff[1] = cmd.data[1];
+  buff[2] = cmd.data[2];
+  buff[3] = cmd.data[3];
+
+  event_tmp.length = 4;
+  event_tmp.data = buff;
+
+  hmi.Send(event_tmp);
+
+  return E_SUCCESS;
+}
+
+ErrCode ToolHeadLaser::SetProtectTemp(SSTP_Event_t &event) {
+  CanStdFuncCmd_t cmd;
+  int8_t can_buffer[2];
+
+  can_buffer[0] = event.data[0];
+  can_buffer[1] = event.data[1];
+  cmd.id        = MODULE_FUNC_SET_PROTECT_TEMP;
+  cmd.data      = (uint8_t *)can_buffer;
+  cmd.length    = 2;
+
+  return canhost.SendStdCmd(cmd);
+}
+
+ErrCode ToolHeadLaser::LaserControl(uint8_t state) {
+  CanStdFuncCmd_t cmd;
+  uint8_t can_buffer[1];
+
+  can_buffer[0] = state;
+  cmd.id        = MODULE_FUNC_LASER_CTRL;
+  cmd.data      = can_buffer;
+  cmd.length    = 1;
+
+  ErrCode ret;
+  ret = canhost.SendStdCmdSync(cmd, 2000);
+  if (ret != E_SUCCESS) {
+    return ret;
+  }
+  laser_10w_status_ = state ? LASER_10W_ENABLE : LASER_10W_DISABLE;
+  return E_SUCCESS;
+}
+
+ErrCode ToolHeadLaser::LaserGetHWVersion() {
+  CanStdFuncCmd_t cmd;
+  uint8_t buff[1] = {0};
+
+  cmd.id        = MODULE_FUNC_GET_LASER_HW_VERSION;
+  cmd.data      = buff;
+  cmd.length    = 1;
+
+  ErrCode ret;
+  ret = canhost.SendStdCmdSync(cmd, 2000);
+  if (ret != E_SUCCESS) {
+    return ret;
+  }
+
+  SSTP_Event_t event_tmp = {EID_SETTING_ACK, SETTINGS_OPC_GET_LASER_HW_VERSION};
+  buff[0] = cmd.data[0];
+  event_tmp.length = 1;
+  event_tmp.data = buff;
+  hmi.Send(event_tmp);
+
+  return E_SUCCESS;
+}
+
+void ToolHeadLaser::TellSecurityStatus() {
+  SendSecurityStatus();
+  SERIAL_ECHO("Laser 10w security state: 0x");
+  SERIAL_PRINTLN(laser->security_status_, HEX);
+
+  SERIAL_ECHOLNPAIR("Laser 10w temp: ", laser->laser_temperature_, ", imu temp: ", laser->imu_temperature_, ", roll: ", laser->roll_, ", pitch: ", laser->pitch_, ", pwm_pin_pulldown_state_: ", laser->pwm_pin_pulldown_state_, ", pwm_pin_pullup_state_: ", laser->pwm_pin_pullup_state_);
+}
+
+uint8_t ToolHeadLaser::LaserGetPwmPinState() {
+  CanStdFuncCmd_t cmd;
+  uint8_t can_buffer[1] = {0};
+
+  cmd.id        = MODULE_FUNC_REPORT_PIN_STATE;
+  cmd.data      = can_buffer;
+  cmd.length    = 1;
+
+  if (canhost.SendStdCmdSync(cmd, 2000) != E_SUCCESS) {
+    return 0xff;
+  }
+
+  return cmd.data[0];
+}
+
+void ToolHeadLaser::LaserConfirmPinState() {
+  CanStdFuncCmd_t cmd;
+  uint8_t can_buffer[1] = {0};
+
+  cmd.id        = MODULE_FUNC_CONFIRM_PIN_STATE;
+  cmd.data      = can_buffer;
+  cmd.length    = 1;
+
+  canhost.SendStdCmd(cmd);
+}
+
 void ToolHeadLaser::Process() {
   if (++timer_in_process_ < 100) return;
-
   timer_in_process_ = 0;
 
+  if (laser->device_id_ == MODULE_DEVICE_ID_10W_LASER) {
+    if (laser_pwm_pin_checked_ == false) {
+      PwmCtrlDirectly(255);
+      pwm_pin_pulldown_state_ = LaserGetPwmPinState();
+      PwmCtrlDirectly(0);
+      pwm_pin_pullup_state_ = LaserGetPwmPinState();
+      if (pwm_pin_pulldown_state_ == 0 && pwm_pin_pullup_state_ == 1) {
+        LaserConfirmPinState();
+      }
+      laser_pwm_pin_checked_ = true;
+    }
+
+    if (need_to_tell_hmi_) {
+      need_to_tell_hmi_ = false;
+      TellSecurityStatus();
+    }
+
+    TurnoffLaserIfNeeded();
+  }
+
   TryCloseFan();
+}
+
+
+void ToolHeadLaser::InlineDisable() {
+  planner.laser_inline.status.isEnabled = false;
+}
+
+
+void ToolHeadLaser::SetOutputInline(float power) {
+  CheckFan(power);
+  planner.laser_inline.status.isEnabled = true;
+
+  SetPower(power);
+  planner.laser_inline.power = power_pwm_;
+}
+
+
+void ToolHeadLaser::TurnOn_ISR(uint16_t power_pwm) {
+  if (power_pwm > power_limit_pwm_)
+    power_pwm = power_limit_pwm_;
+
+  TimSetPwm(power_pwm);
 }
